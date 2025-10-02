@@ -365,11 +365,9 @@ defmodule Tds.Protocol do
 
     # SOCKS5 proxy support
     proxy_host = Keyword.get(opts, :proxy_host)
-    # Default SOCKS5 port, but Oxylabs may use 7777
     proxy_port = Keyword.get(opts, :proxy_port, 1080)
     proxy_username = Keyword.get(opts, :proxy_username)
     proxy_password = Keyword.get(opts, :proxy_password)
-    # tcp_opts = [:binary, packet: :raw, active: false] ++ Keyword.get(opts, :socket_options, [])
 
     connection_result =
       if proxy_host do
