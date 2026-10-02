@@ -162,6 +162,8 @@ defmodule Tds.Protocol do
     # linked to
     {pid, ref} =
       spawn_monitor(fn ->
+        watch_parent(parent, self())
+
         result =
           try do
             {:ok, fun.()}
@@ -203,6 +205,20 @@ defmodule Tds.Protocol do
 
         access_token_failed("timed out after #{timeout}ms")
     end
+  end
+
+  # Kills the resolver if the connecting process dies first, and goes away
+  # with the resolver otherwise
+  defp watch_parent(parent, resolver) do
+    spawn(fn ->
+      parent_ref = Process.monitor(parent)
+      resolver_ref = Process.monitor(resolver)
+
+      receive do
+        {:DOWN, ^parent_ref, :process, _, _} -> Process.exit(resolver, :kill)
+        {:DOWN, ^resolver_ref, :process, _, _} -> :ok
+      end
+    end)
   end
 
   defp access_token_failed(reason),

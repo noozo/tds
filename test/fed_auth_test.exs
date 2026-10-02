@@ -154,6 +154,26 @@ defmodule FedAuthTest do
       refute log =~ "SECRET-TOKEN-123"
     end
 
+    test "the resolver stops when the connecting process dies" do
+      parent = self()
+
+      token = fn ->
+        send(parent, {:resolver, self()})
+        Process.sleep(:infinity)
+      end
+
+      conn =
+        spawn(fn ->
+          Tds.Protocol.connect([access_token: token, connect_timeout: 60_000] ++ @opts)
+        end)
+
+      assert_receive {:resolver, resolver}, 1_000
+      ref = Process.monitor(resolver)
+      Process.exit(conn, :kill)
+
+      assert_receive {:DOWN, ^ref, :process, ^resolver, _reason}, 1_000
+    end
+
     test "returns an error naming only the exception when the token function raises" do
       opts = [access_token: fn -> raise "SECRET-BOOM" end] ++ @opts
 
