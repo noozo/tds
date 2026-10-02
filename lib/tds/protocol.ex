@@ -505,8 +505,10 @@ defmodule Tds.Protocol do
          :ok <- :inet.setopts(sock, buffer: max_buf_size(buffers)) do
       # Send Prelogin message to SQL Server
       case send_prelogin(%{s | sock: {:gen_tcp, sock}}) do
-        {:error, error, _state} ->
-          :gen_tcp.close(sock)
+        # close through the transport in use, which is TLS once PRELOGIN
+        # negotiated encryption
+        {:error, error, state} ->
+          disconnect(error, state)
           {:error, error}
 
         {:disconnect, error, state} ->

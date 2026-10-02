@@ -111,4 +111,28 @@ defmodule TlsLifecycleTest do
     assert_received {:sni, ~c"gateway.example"}
     assert_received {:sni, ~c"localhost"}
   end
+
+  test "failed TLS logins leave no ssl or TLS transport processes behind" do
+    parent = self()
+
+    client =
+      spawn(fn ->
+        for _ <- 1..5 do
+          {_server, port} = FakeServer.start(tls: true, fed_auth_ack: false)
+          opts = tls_opts(port) ++ [access_token: "tok"]
+          {:error, _} = Tds.Protocol.connect(opts)
+        end
+
+        send(parent, {:done, Process.info(self(), :links)})
+        Process.sleep(:infinity)
+      end)
+
+    assert_receive {:done, {:links, links}}, 10_000
+    Process.sleep(200)
+
+    # each ssl connection process monitors its owner
+    assert {:monitored_by, []} = Process.info(client, :monitored_by)
+    assert Enum.filter(links, &(is_pid(&1) and Process.alive?(&1))) == []
+    Process.exit(client, :kill)
+  end
 end
