@@ -1437,6 +1437,8 @@ defimpl Inspect, for: Tds.Protocol do
   # Protocol state ends up in crash reports and DBConnection errors, keep
   # credentials out of it
   @secrets [:password, :access_token, :proxy_password]
+  # ssl_opts: the private key, its password and the same in certs_keys
+  @ssl_secrets [:password, :key]
 
   def inspect(s, opts) do
     s = %{s | opts: redact(s.opts), access_token: s.access_token && :REDACTED}
@@ -1446,9 +1448,34 @@ defimpl Inspect, for: Tds.Protocol do
   defp redact(opts) when is_list(opts) do
     Enum.map(opts, fn
       {key, _value} when key in @secrets -> {key, :REDACTED}
+      {:ssl_opts, ssl_opts} -> {:ssl_opts, redact_ssl(ssl_opts)}
       other -> other
     end)
   end
 
   defp redact(other), do: other
+
+  defp redact_ssl(ssl_opts) when is_list(ssl_opts) do
+    Enum.map(ssl_opts, fn
+      {key, _value} when key in @ssl_secrets ->
+        {key, :REDACTED}
+
+      {:certs_keys, certs_keys} when is_list(certs_keys) ->
+        {:certs_keys, Enum.map(certs_keys, &redact_cert_key/1)}
+
+      other ->
+        other
+    end)
+  end
+
+  defp redact_ssl(other), do: other
+
+  defp redact_cert_key(%{} = cert_key) do
+    Map.new(cert_key, fn
+      {key, _value} when key in @ssl_secrets -> {key, :REDACTED}
+      other -> other
+    end)
+  end
+
+  defp redact_cert_key(other), do: other
 end

@@ -284,7 +284,19 @@ defmodule ConnectionFailureTest do
 
     test "inspect never shows credentials" do
       state = %Tds.Protocol{
-        opts: [password: "pw-123", access_token: @token, proxy_password: "proxy-123"],
+        opts: [
+          password: "pw-123",
+          access_token: @token,
+          proxy_password: "proxy-123",
+          ssl_opts: [
+            verify: :verify_peer,
+            password: "keyfile-secret",
+            key: {:RSAPrivateKey, "der-key-123"},
+            certs_keys: [
+              %{certfile: "c.pem", key: {:ECPrivateKey, "ec-key-123"}, password: "ck-123"}
+            ]
+          ]
+        ],
         access_token: @token
       }
 
@@ -292,6 +304,12 @@ defmodule ConnectionFailureTest do
       refute_token(inspected)
       refute inspected =~ "pw-123"
       refute inspected =~ "proxy-123"
+
+      for secret <- ["keyfile-secret", "der-key-123", "ec-key-123", "ck-123"],
+          do: refute(inspected =~ secret)
+
+      assert inspected =~ ":verify_peer"
+      assert inspected =~ "c.pem"
       assert inspected =~ "%Tds.Protocol{"
     end
   end
