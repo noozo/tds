@@ -1,3 +1,13 @@
+defmodule FedAuthTest.LinkedHolder do
+  # Stands in for a cache or HTTP client the token function starts and links
+  use GenServer
+
+  def init(_) do
+    Process.flag(:trap_exit, true)
+    {:ok, nil}
+  end
+end
+
 defmodule FedAuthTest do
   use ExUnit.Case, async: true
 
@@ -127,6 +137,21 @@ defmodule FedAuthTest do
 
         refute log =~ "verify_none"
       end
+    end
+
+    test "the token never reaches a process the token function linked to" do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          token = fn ->
+            {:ok, _holder} = GenServer.start_link(FedAuthTest.LinkedHolder, nil)
+            "SECRET-TOKEN-123"
+          end
+
+          Tds.Protocol.connect([access_token: token] ++ @opts)
+          Process.sleep(200)
+        end)
+
+      refute log =~ "SECRET-TOKEN-123"
     end
 
     test "returns an error naming only the exception when the token function raises" do

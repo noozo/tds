@@ -154,6 +154,12 @@ defmodule Tds.Protocol do
   defp fetch_access_token(token, _timeout), do: normalize_access_token(token)
 
   defp call_access_token(fun, timeout) do
+    parent = self()
+    tag = make_ref()
+
+    # The result goes back as a message and the resolver exits :normal, so
+    # the token never travels in an exit signal to processes the function
+    # linked to
     {pid, ref} =
       spawn_monitor(fn ->
         result =
@@ -165,22 +171,36 @@ defmodule Tds.Protocol do
             kind, _reason -> {:failed, Atom.to_string(kind)}
           end
 
-        exit({:access_token, result})
+        send(parent, {tag, result})
       end)
 
     receive do
-      {:DOWN, ^ref, :process, ^pid, {:access_token, {:ok, token}}} ->
-        normalize_access_token(token)
+      {^tag, result} ->
+        Process.demonitor(ref, [:flush])
 
-      {:DOWN, ^ref, :process, ^pid, {:access_token, {:failed, reason}}} ->
-        access_token_failed(reason)
+        case result do
+          {:ok, token} -> normalize_access_token(token)
+          {:failed, reason} -> access_token_failed(reason)
+        end
 
       {:DOWN, ^ref, :process, ^pid, _reason} ->
         access_token_failed("exit")
     after
       timeout ->
-        Process.demonitor(ref, [:flush])
         Process.exit(pid, :kill)
+
+        # a result sent just before the kill arrives ahead of :DOWN, drop it
+        # so the token does not linger in this mailbox
+        receive do
+          {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+        end
+
+        receive do
+          {^tag, _result} -> :ok
+        after
+          0 -> :ok
+        end
+
         access_token_failed("timed out after #{timeout}ms")
     end
   end
