@@ -10,7 +10,8 @@ defmodule Tds.FakeServer do
   #   {:reply, packets} | {:close, packets} | :hang
   # and `login: :close` hangs up after reading LOGIN7, `set_batch: :close`
   # after reading the connection SET batch. `fed_auth_required: 0 | 1` adds
-  # FEDAUTHREQUIRED to the PRELOGIN response. `redirect: port` plays
+  # FEDAUTHREQUIRED to the PRELOGIN response and `fed_auth_ack: false` leaves
+  # the FEDAUTH FEATUREEXTACK out of the login response. `redirect: port` plays
   # an Azure gateway: it routes the client to 127.0.0.1:port and reports
   # whether the client closes the leg (as {:gateway_leg, result}), hanging up
   # itself if the client keeps it open.
@@ -60,7 +61,11 @@ defmodule Tds.FakeServer do
 
       :ok ->
         # LOGINACK, FEATUREEXTACK (FEDAUTH, no data) and DONE
-        featureextack = <<0xAE, 0x02, 0::little-32, 0xFF>>
+        featureextack =
+          if Keyword.get(opts, :fed_auth_ack, true),
+            do: <<0xAE, 0x02, 0::little-32, 0xFF>>,
+            else: <<>>
+
         send_data(conn, packet(1, loginack() <> featureextack <> done()))
 
         # connection SET statements
@@ -147,11 +152,13 @@ defmodule Tds.FakeServer do
 
   defp cert_opts, do: [key: {:rsa, 2048, 65_537}, digest: :sha256]
 
-  # Reads one client message, packet by packet, up to the EOM status bit
+  # Reads one client message, packet by packet, up to the EOM status bit.
+  # Returns {:error, reason} once the client has hung up.
   def recv_message(conn, acc \\ <<>>) do
-    {:ok, <<_type, status, length::16, _::binary-4>>} = recv(conn, 8, 5_000)
-    {:ok, data} = recv(conn, length - 8, 5_000)
-    if status == 0, do: recv_message(conn, acc <> data), else: acc <> data
+    with {:ok, <<_type, status, length::16, _::binary-4>>} <- recv(conn, 8, 5_000),
+         {:ok, data} <- recv(conn, length - 8, 5_000) do
+      if status == 0, do: recv_message(conn, acc <> data), else: acc <> data
+    end
   end
 
   defp recv({:gen_tcp, sock}, n, timeout), do: :gen_tcp.recv(sock, n, timeout)

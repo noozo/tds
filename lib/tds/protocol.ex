@@ -948,13 +948,21 @@ defmodule Tds.Protocol do
     end
   end
 
-  def message(:login, msg_loginack(), %{opts: opts} = s) do
-    state = %{s | opts: clean_opts(opts), access_token: nil}
+  # FEDAUTH FeatureId. Without its FEATUREEXTACK the server did not log in
+  # with the token.
+  @fed_auth_feature 0x02
 
-    opts
-    |> conn_opts()
-    |> IO.iodata_to_binary()
-    |> send_query(state)
+  def message(:login, msg_loginack(features: features), %{opts: opts} = s) do
+    if is_binary(s.access_token) and @fed_auth_feature not in features do
+      {:error, Tds.Error.exception("server did not acknowledge federated authentication"), s}
+    else
+      state = %{s | opts: clean_opts(opts), access_token: nil}
+
+      opts
+      |> conn_opts()
+      |> IO.iodata_to_binary()
+      |> send_query(state)
+    end
   end
 
   def message(:executing, msg_result(set: set), s) do

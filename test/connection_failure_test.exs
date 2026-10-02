@@ -88,6 +88,13 @@ defmodule ConnectionFailureTest do
     assert {:error, %DBConnection.ConnectionError{message: @closed}} = Tds.Protocol.connect(opts)
   end
 
+  test "a password login needs no FEDAUTH acknowledgement" do
+    {_server, port} = FakeServer.start(fed_auth_ack: false)
+
+    opts = [hostname: "127.0.0.1", port: port, username: "u", password: "p", ssl: false]
+    assert {:ok, _state} = Tds.Protocol.connect(opts)
+  end
+
   describe "on a socket the client already closed" do
     setup do
       {_server, port} = FakeServer.start(script: [])
@@ -176,6 +183,16 @@ defmodule ConnectionFailureTest do
                  <<0x02, byte_size(token) + 5::little-32, options, byte_size(token)::little-32>> <>
                    token
       end
+    end
+
+    test "a login the server did not acknowledge as federated fails" do
+      {_server, port} = FakeServer.start(tls: true, fed_auth_ack: false)
+
+      capture_log(fn ->
+        assert {:error,
+                %Tds.Error{message: "server did not acknowledge federated authentication"}} =
+                 Tds.Protocol.connect(token_opts(port))
+      end)
     end
 
     test "a redirect sends the token to the routed server" do

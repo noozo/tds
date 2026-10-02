@@ -1,7 +1,7 @@
 defmodule FedAuthTest do
   use ExUnit.Case, async: true
 
-  import Tds.Messages, only: [msg_error: 1, msg_loginack: 0]
+  import Tds.Messages, only: [msg_error: 1, msg_loginack: 1]
 
   alias Tds.Protocol.Prelogin
 
@@ -55,10 +55,10 @@ defmodule FedAuthTest do
                Tds.Tokens.decode_tokens(ack <> @done)
     end
 
-    test "FEATUREEXTACK is ignored by the login parser" do
+    test "the login parser records the acknowledged features" do
       ack = <<0xAE, 0x02, 0::little-32, 0xFF>>
 
-      assert {msg_loginack(), %Tds.Protocol{}} =
+      assert {msg_loginack(features: [0x02]), %Tds.Protocol{}} =
                Tds.Messages.parse(:login, ack <> @done, %Tds.Protocol{})
     end
 

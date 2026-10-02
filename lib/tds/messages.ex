@@ -23,7 +23,8 @@ defmodule Tds.Messages do
 
   # responses
   defrecord :msg_preloginack, [:response]
-  defrecord :msg_loginack, [:redirect]
+  # features: FeatureIds the server acknowledged in FEATUREEXTACK
+  defrecord :msg_loginack, [:redirect, features: []]
   defrecord :msg_prepared, [:params]
   defrecord :msg_sql_result, [:columns, :rows, :row_count]
   defrecord :msg_result, [:set, :params, :status]
@@ -79,6 +80,9 @@ defmodule Tds.Messages do
       {:envchange, other}, {msg, s} ->
         {msg, on_envchange(other, s)}
 
+      {:featureextack, features}, {msg_loginack() = msg, s} ->
+        {msg_loginack(msg, features: Enum.map(features, &elem(&1, 0))), s}
+
       {:loginack, %{tds_version: version}}, {msg, s} ->
         Process.put(:tds_version, version)
         {msg, s}
@@ -108,7 +112,6 @@ defmodule Tds.Messages do
         {msg_error(error: error), s}
 
       _, msg ->
-        # FeatureExtAck (e.g. the FEDAUTH acknowledgement) needs no action
         msg
     end)
   end
