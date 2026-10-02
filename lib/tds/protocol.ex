@@ -1050,8 +1050,7 @@ defmodule Tds.Protocol do
       |> decode(s)
     else
       {:error, reason} ->
-        {:disconnect,
-         %Tds.Error{message: "Connection failed to send packet due #{inspect(reason)}"}, s}
+        {:disconnect, closed_error(reason), s}
 
       {:max_response_bytes, limit, received} ->
         max_response_bytes_exceeded(limit, received, s)
@@ -1078,10 +1077,10 @@ defmodule Tds.Protocol do
         |> msg_recv(received, s)
 
       {:error, error} ->
-        {:disconnect, recv_error(error), s}
+        {:disconnect, closed_error(error), s}
     end
   catch
-    {:error, error} -> {:disconnect, recv_error(error), s}
+    {:error, error} -> {:disconnect, closed_error(error), s}
     {:max_response_bytes, _limit, _received} = exceeded -> exceeded
   end
 
@@ -1119,8 +1118,12 @@ defmodule Tds.Protocol do
     end
   end
 
-  defp recv_error(error) do
-    %Tds.Error{message: "Connection failed to receive packet due #{inspect(error)}"}
+  # Same exception as the other DBConnection drivers raise for a dead socket,
+  # so `rescue DBConnection.ConnectionError` keeps catching it
+  defp closed_error(reason) do
+    DBConnection.ConnectionError.exception(
+      "tds connection closed (the pool may have closed it after a timeout): #{inspect(reason)}"
+    )
   end
 
   # Bytes read from the socket for the current response, packet headers

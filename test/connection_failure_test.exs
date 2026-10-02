@@ -9,6 +9,8 @@ defmodule ConnectionFailureTest do
   alias Tds.Encoding.UCS2
   alias Tds.FakeServer
 
+  @closed "tds connection closed (the pool may have closed it after a timeout): :closed"
+
   setup do
     level = Logger.level()
     Logger.configure(level: :debug)
@@ -37,7 +39,7 @@ defmodule ConnectionFailureTest do
 
     log =
       capture_log(fn ->
-        assert {:error, %Tds.Error{message: "Connection failed to receive packet due :closed"}} =
+        assert {:error, %DBConnection.ConnectionError{message: @closed}} =
                  Tds.query(pid, "SELECT 1", [])
 
         # the pool drops the broken connection
@@ -54,12 +56,60 @@ defmodule ConnectionFailureTest do
     log =
       capture_log(fn ->
         assert {:error, error} = Tds.query(pid, "SELECT 1", [], timeout: 200)
-        assert %Tds.Error{message: "Connection failed to receive packet due :closed"} = error
+        # DBConnection adds that the pool closed it
+        assert %DBConnection.ConnectionError{
+                 message: @closed <> " (the connection was closed" <> _
+               } =
+                 error
+
         Process.sleep(100)
       end)
 
     assert log =~ "timed out"
     refute log =~ "bad return value"
+  end
+
+  test "a socket closed mid-response raises DBConnection.ConnectionError from query!" do
+    partial = FakeServer.packet(0, <<0::size(100)-unit(8)>>)
+    {_server, port} = FakeServer.start(script: [{:close, [partial]}])
+    {:ok, pid} = start_conn(port)
+
+    capture_log(fn ->
+      assert_raise DBConnection.ConnectionError, @closed, fn ->
+        Tds.query!(pid, "SELECT 1", [])
+      end
+    end)
+  end
+
+  describe "on a socket the client already closed" do
+    setup do
+      {_server, port} = FakeServer.start(script: [])
+
+      {:ok, s} =
+        Tds.Protocol.connect(
+          hostname: "127.0.0.1",
+          port: port,
+          username: "u",
+          password: "p",
+          ssl: false
+        )
+
+      {:gen_tcp, sock} = s.sock
+      :ok = :gen_tcp.close(sock)
+      %{state: s}
+    end
+
+    test "a send failure returns a ConnectionError disconnect", %{state: s} do
+      query = %Tds.Query{statement: "SELECT 1"}
+
+      assert {:disconnect, %DBConnection.ConnectionError{message: @closed}, _s} =
+               Tds.Protocol.handle_execute(query, [], [], s)
+    end
+
+    test "ping returns a ConnectionError disconnect", %{state: s} do
+      assert {:disconnect, %DBConnection.ConnectionError{message: @closed}, _s} =
+               Tds.Protocol.ping(s)
+    end
   end
 
   describe "with an access token" do
@@ -112,7 +162,7 @@ defmodule ConnectionFailureTest do
       log =
         capture_log(fn ->
           assert {:error, error} = Tds.Protocol.connect(token_opts(port))
-          assert %Tds.Error{message: "Connection failed to receive packet due :closed"} = error
+          assert %DBConnection.ConnectionError{message: @closed} = error
           refute_token(inspect(error))
         end)
 
@@ -126,7 +176,7 @@ defmodule ConnectionFailureTest do
 
       log =
         capture_log(fn ->
-          assert {:error, %Tds.Error{message: "Connection failed to receive packet due :closed"}} =
+          assert {:error, %DBConnection.ConnectionError{message: @closed}} =
                    Tds.query(pid, "SELECT 1", [])
 
           Process.sleep(100)
@@ -142,7 +192,9 @@ defmodule ConnectionFailureTest do
 
       log =
         capture_log(fn ->
-          assert {:error, %Tds.Error{}} = Tds.query(pid, "SELECT 1", [], timeout: 200)
+          assert {:error, %DBConnection.ConnectionError{}} =
+                   Tds.query(pid, "SELECT 1", [], timeout: 200)
+
           Process.sleep(100)
         end)
 
