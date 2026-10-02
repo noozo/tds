@@ -717,6 +717,9 @@ defmodule Tds.Protocol do
 
       {:error, err, s} ->
         {:disconnect, err, s}
+
+      {:disconnect, _err, _s} = disconnect ->
+        disconnect
     end
   end
 
@@ -942,6 +945,9 @@ defmodule Tds.Protocol do
       {:disconnect, ex, s} ->
         {:disconnect, ex, %{s | opts: clean_opts(opts)}}
 
+      {:max_response_bytes, limit} ->
+        max_response_bytes_exceeded(limit, %{s | opts: clean_opts(opts)})
+
       buffer ->
         buffer
         |> IO.iodata_to_binary()
@@ -975,17 +981,27 @@ defmodule Tds.Protocol do
       |> IO.iodata_to_binary()
       |> decode(s)
     else
+      {:max_response_bytes, limit} -> max_response_bytes_exceeded(limit, s)
       {:disconnect, _ex, _s} = res -> {0, res}
       other -> other
     end
   end
 
+  # The rest of the response is still on the wire, so the connection can't be
+  # reused. Close it and let DBConnection drop it.
+  defp max_response_bytes_exceeded(limit, %{sock: {mod, sock}} = s) do
+    _ = mod.close(sock)
+    {:disconnect, Tds.Error.exception("response exceeded max_response_bytes (#{limit})"), s}
+  end
+
   defp msg_recv(%{sock: {mod, pid}} = s) do
     case mod.recv(pid, 0) do
       {:ok, pkg} ->
+        received = count_received(0, pkg, s)
+
         pkg
         |> next_tds_pkg([])
-        |> msg_recv(s)
+        |> msg_recv(received, s)
 
       {:error, error} ->
         {:disconnect,
@@ -995,35 +1011,51 @@ defmodule Tds.Protocol do
     end
   catch
     {:error, error} -> {:disconnect, error, s}
+    {:max_response_bytes, _limit} = exceeded -> exceeded
   end
 
-  defp msg_recv({:done, buffer, _}, _s) do
+  defp msg_recv({:done, buffer, _}, _received, _s) do
     Enum.reverse(buffer)
   end
 
-  defp msg_recv({:more, buffer, more, last?}, %{sock: {mod, pid}} = s) do
+  defp msg_recv({:more, buffer, more, last?}, received, %{sock: {mod, pid}} = s) do
     take = if last?, do: more, else: 0
 
     case mod.recv(pid, take) do
       {:ok, pkg} ->
+        received = count_received(received, pkg, s)
+
         next_tds_pkg(pkg, buffer, more, last?)
-        |> msg_recv(s)
+        |> msg_recv(received, s)
 
       {:error, error} ->
         throw({:error, error})
     end
   end
 
-  defp msg_recv({:more, buffer, unknown_pkg}, %{sock: {mod, pid}} = s) do
+  defp msg_recv({:more, buffer, unknown_pkg}, received, %{sock: {mod, pid}} = s) do
     case mod.recv(pid, 0) do
       {:ok, pkg} ->
+        received = count_received(received, pkg, s)
+
         unknown_pkg
         |> Kernel.<>(pkg)
         |> next_tds_pkg(buffer)
-        |> msg_recv(s)
+        |> msg_recv(received, s)
 
       {:error, error} ->
         throw({:error, error})
+    end
+  end
+
+  # Bytes read from the socket for the current response, packet headers
+  # included. Stops reading once :max_response_bytes is exceeded.
+  defp count_received(received, pkg, %{opts: opts}) do
+    received = received + byte_size(pkg)
+
+    case opts[:max_response_bytes] do
+      limit when is_integer(limit) and received > limit -> throw({:max_response_bytes, limit})
+      _ -> received
     end
   end
 
