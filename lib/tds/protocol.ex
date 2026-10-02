@@ -42,7 +42,8 @@ defmodule Tds.Protocol do
           result: nil | list(),
           query: nil | String.t(),
           transaction: transaction,
-          env: env
+          env: env,
+          fed_auth_echo: boolean()
         }
 
   defstruct sock: nil,
@@ -59,7 +60,10 @@ defmodule Tds.Protocol do
               savepoint: 0,
               collation: %Tds.Protocol.Collation{},
               packetsize: 4096
-            }
+            },
+            # FEDAUTHREQUIRED value from the server's PRELOGIN response,
+            # echoed back in the LOGIN7 FEDAUTH feature extension
+            fed_auth_echo: false
 
   @spec connect(opts :: Keyword.t()) :: {:ok, state :: t()} | {:error, Exception.t()}
   def connect(opts) do
@@ -73,17 +77,61 @@ defmodule Tds.Protocol do
 
     s = %__MODULE__{}
 
-    case opts[:instance] do
-      nil ->
-        connect(opts, s)
+    with {:ok, opts} <- resolve_access_token(opts) do
+      case opts[:instance] do
+        nil ->
+          connect(opts, s)
 
-      _instance ->
-        case instance(opts, s) do
-          {:ok, s} -> connect(opts, s)
-          err -> {:error, err}
+        _instance ->
+          case instance(opts, s) do
+            {:ok, s} -> connect(opts, s)
+            err -> {:error, err}
+          end
+      end
+    end
+  end
+
+  # The access token is resolved on every connect, so a function or MFA can
+  # hand out a fresh token when the pool (re)connects after the last one expired.
+  defp resolve_access_token(opts) do
+    case Keyword.fetch(opts, :access_token) do
+      :error ->
+        {:ok, opts}
+
+      {:ok, token} ->
+        with :ok <- validate_access_token_ssl(opts),
+             {:ok, token} <- fetch_access_token(token) do
+          {:ok, Keyword.put(opts, :access_token, token)}
         end
     end
   end
+
+  # The token is a bearer credential, never send it over an unencrypted connection
+  defp validate_access_token_ssl(opts) do
+    if opts[:ssl] in [true, :required, :on] do
+      :ok
+    else
+      {:error, Tds.Error.exception(":access_token requires ssl: true (or :required)")}
+    end
+  end
+
+  defp fetch_access_token(fun) when is_function(fun, 0), do: normalize_access_token(fun.())
+
+  defp fetch_access_token({mod, fun, args}) when is_atom(mod) and is_atom(fun) and is_list(args),
+    do: normalize_access_token(apply(mod, fun, args))
+
+  defp fetch_access_token(token), do: normalize_access_token(token)
+
+  defp normalize_access_token(token) when is_binary(token) and token != "", do: {:ok, token}
+
+  defp normalize_access_token({:ok, token}) when is_binary(token) and token != "",
+    do: {:ok, token}
+
+  defp normalize_access_token({:error, reason}),
+    do: {:error, Tds.Error.exception("unable to fetch access token: #{inspect(reason)}")}
+
+  defp normalize_access_token(_other),
+    do: {:error, Tds.Error.exception("invalid :access_token, expected a non-empty string")}
 
   @spec disconnect(err :: Exception.t() | String.t(), state :: t()) :: :ok
   def disconnect(_err, %{sock: {mod, sock}} = s) do
@@ -600,7 +648,7 @@ defmodule Tds.Protocol do
   end
 
   def login(%{opts: opts} = s) do
-    msg = msg_login(params: opts)
+    msg = msg_login(params: Keyword.put(opts, :fed_auth_echo, s.fed_auth_echo))
 
     case login_send(msg, %{s | state: :login}) do
       {:ok, s} ->
@@ -1017,7 +1065,11 @@ defmodule Tds.Protocol do
   end
 
   defp clean_opts(opts) do
-    Keyword.put(opts, :password, :REDACTED)
+    opts = Keyword.put(opts, :password, :REDACTED)
+
+    if Keyword.has_key?(opts, :access_token),
+      do: Keyword.put(opts, :access_token, :REDACTED),
+      else: opts
   end
 
   @spec conn_opts(Keyword.t()) :: list() | no_return

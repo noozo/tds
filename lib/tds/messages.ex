@@ -93,8 +93,22 @@ defmodule Tds.Messages do
       {:error, error}, _ ->
         {msg_error(error: error), s}
 
+      {:fedauthinfo, _}, {msg_error(), _s} = msg_s ->
+        msg_s
+
+      {:fedauthinfo, _}, {_, s} ->
+        error = %{
+          line_number: 0,
+          number: 0,
+          msg_text:
+            "Server requested FEDAUTHINFO, which is not supported. " <>
+              "Pass a pre-acquired :access_token instead"
+        }
+
+        {msg_error(error: error), s}
+
       _, msg ->
-        # FeatureExtAck should be processed here in future
+        # FeatureExtAck (e.g. the FEDAUTH acknowledgement) needs no action
         msg
     end)
   end
