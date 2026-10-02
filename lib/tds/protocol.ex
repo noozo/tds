@@ -147,8 +147,8 @@ defmodule Tds.Protocol do
       {:ok, _, s} ->
         {:ok, s}
 
-      {:disconnect, :closed, s} ->
-        {:disconnect, %Tds.Error{message: "Connection closed."}, s}
+      {:disconnect, _err, _s} = disconnect ->
+        disconnect
 
       {:error, err, s} ->
         err =
@@ -443,6 +443,10 @@ defmodule Tds.Protocol do
           :gen_tcp.close(sock)
           {:error, error}
 
+        {:disconnect, error, state} ->
+          disconnect(error, state)
+          {:error, error}
+
         other ->
           other
       end
@@ -615,6 +619,9 @@ defmodule Tds.Protocol do
 
       {:error, _, _} = err ->
         err
+
+      {:disconnect, _, _} = err ->
+        err
     end
   end
 
@@ -711,9 +718,6 @@ defmodule Tds.Protocol do
     case msg_send(msg, %{s | state: :transaction_manager}) do
       {:ok, %{result: result} = s} ->
         {:ok, result, s}
-
-      {:error, err} ->
-        {:disconnect, err, s}
 
       {:error, err, s} ->
         {:disconnect, err, s}
@@ -868,12 +872,16 @@ defmodule Tds.Protocol do
   def message(
         :login,
         msg_loginack(redirect: %{hostname: host, port: port}),
-        %{opts: opts}
+        %{opts: opts} = s
       ) do
     opts
     |> Keyword.put(:hostname, host)
     |> Keyword.put(:port, port)
     |> connect()
+    |> case do
+      {:ok, s} -> {:ok, s}
+      {:error, err} -> {:error, err, s}
+    end
   end
 
   def message(:login, msg_loginack(), %{opts: opts} = s) do
@@ -981,14 +989,15 @@ defmodule Tds.Protocol do
       |> IO.iodata_to_binary()
       |> decode(s)
     else
+      {:error, reason} ->
+        {:disconnect,
+         %Tds.Error{message: "Connection failed to send packet due #{inspect(reason)}"}, s}
+
       {:max_response_bytes, limit, received} ->
         max_response_bytes_exceeded(limit, received, s)
 
-      {:disconnect, _ex, _s} = res ->
-        {0, res}
-
-      other ->
-        other
+      {:disconnect, _ex, _s} = disconnect ->
+        disconnect
     end
   end
 
@@ -1009,13 +1018,10 @@ defmodule Tds.Protocol do
         |> msg_recv(received, s)
 
       {:error, error} ->
-        {:disconnect,
-         %Tds.Error{
-           message: "Connection failed to receive packet due #{inspect(error)}"
-         }, s}
+        {:disconnect, recv_error(error), s}
     end
   catch
-    {:error, error} -> {:disconnect, error, s}
+    {:error, error} -> {:disconnect, recv_error(error), s}
     {:max_response_bytes, _limit, _received} = exceeded -> exceeded
   end
 
@@ -1051,6 +1057,10 @@ defmodule Tds.Protocol do
       {:error, error} ->
         throw({:error, error})
     end
+  end
+
+  defp recv_error(error) do
+    %Tds.Error{message: "Connection failed to receive packet due #{inspect(error)}"}
   end
 
   # Bytes read from the socket for the current response, packet headers
