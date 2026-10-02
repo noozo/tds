@@ -89,12 +89,26 @@ defmodule TlsLifecycleTest do
 
     assert {:ok, %Tds.Result{num_rows: 5}} = Tds.query(pool, "SELECT 1", [])
 
-    # the client hangs up on the gateway rather than leaving the gateway to
+    # the client hangs up on the gateway rather than leaving the leg open
     assert_receive {:gateway_leg, {:error, :closed}}, 1_000
     Process.sleep(100)
 
     assert {:ok, %Tds.Result{num_rows: 5}} = Tds.query(pool, "SELECT 1", [])
     refute_received {:disconnected, _}
     refute_received {:DOWN, ^ref, _, _, _}
+  end
+
+  test "a redirect sends the routed host as SNI" do
+    {_target, target_port} = FakeServer.start(tls: true)
+
+    {_gateway, gateway_port} =
+      FakeServer.start(tls: true, redirect: target_port, route_host: "localhost")
+
+    ssl_opts = [verify: :verify_none, server_name_indication: ~c"gateway.example"]
+    opts = Keyword.put(tls_opts(gateway_port), :ssl_opts, ssl_opts)
+
+    assert {:ok, _state} = Tds.Protocol.connect(opts)
+    assert_received {:sni, ~c"gateway.example"}
+    assert_received {:sni, ~c"localhost"}
   end
 end

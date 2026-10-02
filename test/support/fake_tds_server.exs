@@ -12,7 +12,8 @@ defmodule Tds.FakeServer do
   # after reading the connection SET batch. `fed_auth_required: 0 | 1` adds
   # FEDAUTHREQUIRED to the PRELOGIN response and `fed_auth_ack: false` leaves
   # the FEDAUTH FEATUREEXTACK out of the login response. `redirect: port` plays
-  # an Azure gateway: it routes the client to 127.0.0.1:port and reports
+  # an Azure gateway: it routes the client to `route_host` (127.0.0.1 by
+  # default) on that port and reports
   # whether the client closes the leg (as {:gateway_leg, result}), hanging up
   # itself if the client keeps it open.
   #
@@ -44,7 +45,7 @@ defmodule Tds.FakeServer do
     encryption = if tls?, do: 0x01, else: 0x02
     :ok = :gen_tcp.send(sock, packet(1, prelogin(encryption, opts[:fed_auth_required])))
 
-    conn = if tls?, do: {:ssl, tls_handshake(sock)}, else: {:gen_tcp, sock}
+    conn = if tls?, do: {:ssl, tls_handshake(sock, test)}, else: {:gen_tcp, sock}
 
     login7 = recv_message(conn)
     send(test, {:login7, login7})
@@ -57,7 +58,7 @@ defmodule Tds.FakeServer do
         close(conn)
 
       {:redirect, port} ->
-        redirect(conn, port, test)
+        redirect(conn, Keyword.get(opts, :route_host, "127.0.0.1"), port, test)
 
       :ok ->
         # LOGINACK, FEATUREEXTACK (FEDAUTH, no data) and DONE
@@ -89,9 +90,9 @@ defmodule Tds.FakeServer do
       encryption, fed_auth_required>>
   end
 
-  # LOGINACK with a routing ENVCHANGE to 127.0.0.1:port
-  defp redirect(conn, port, test) do
-    host = UCS2.from_string("127.0.0.1")
+  # LOGINACK with a routing ENVCHANGE to host:port
+  defp redirect(conn, host, port, test) do
+    host = UCS2.from_string(host)
     routing = <<0x00, port::little-16, div(byte_size(host), 2)::little-16>> <> host
     env = <<0x14, byte_size(routing)::little-16>> <> routing <> <<0, 0>>
     envchange = <<0xE3, byte_size(env)::little-16>> <> env
@@ -127,7 +128,8 @@ defmodule Tds.FakeServer do
 
   # The client's Tds.Tls transport wraps the handshake in PRELOGIN packets;
   # it is symmetric, so the server side can use it as well
-  defp tls_handshake(sock) do
+  # Reports the client's SNI as {:sni, hostname | :none}
+  defp tls_handshake(sock, test) do
     %{server_config: server_config} =
       :public_key.pkix_test_data(%{
         server_chain: %{root: cert_opts(), intermediates: [], peer: cert_opts()},
@@ -147,6 +149,14 @@ defmodule Tds.FakeServer do
 
     {:ok, ssl} = :ssl.handshake(sock, ssl_opts, 5_000)
     GenServer.cast(tls, :handshake_complete)
+
+    sni =
+      case :ssl.connection_information(ssl, [:sni_hostname]) do
+        {:ok, [sni_hostname: host]} -> host
+        _ -> :none
+      end
+
+    send(test, {:sni, sni})
     ssl
   end
 

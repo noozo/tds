@@ -175,6 +175,11 @@ config :your_app, :tds_conn,
   ]
 ```
 
+When the server routes the login elsewhere (the Azure SQL gateway redirect), the driver
+closes the gateway connection and connects to the routed host with the same options,
+except that a pinned `server_name_indication` is replaced by the routed host name, so
+the hostname check runs against the server that is actually reached.
+
 Only the Security Token workflow is supported: the driver does not acquire tokens
 itself (no ADAL/MSAL `FEDAUTHINFO` exchange).
 

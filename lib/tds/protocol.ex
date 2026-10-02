@@ -940,6 +940,7 @@ defmodule Tds.Protocol do
     opts
     |> Keyword.put(:hostname, host)
     |> Keyword.put(:port, port)
+    |> Keyword.update(:ssl_opts, [], &route_ssl_opts(&1, host))
     |> put_access_token(s.access_token)
     |> connect()
     |> case do
@@ -1007,6 +1008,16 @@ defmodule Tds.Protocol do
     result = %Tds.Result{columns: [], rows: [], num_rows: 0}
 
     {:ok, %{s | statement: "", state: :ready, result: result}}
+  end
+
+  # A pinned SNI names the gateway. The routed server presents its own
+  # certificate, so the SNI (and the hostname check derived from it) follow
+  # the route.
+  defp route_ssl_opts(ssl_opts, host) do
+    case ssl_opts[:server_name_indication] do
+      sni when sni in [nil, :disable] -> ssl_opts
+      _gateway -> Keyword.put(ssl_opts, :server_name_indication, to_charlist(host))
+    end
   end
 
   defp mark_ready(%{state: _} = s) do
