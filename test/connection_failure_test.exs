@@ -108,9 +108,6 @@ defmodule ConnectionFailureTest do
 
     test "a failure mid-login does not show the token" do
       {_server, port} = FakeServer.start(tls: true, login: :close)
-      # the Tds.Tls transport is linked to the connecting process and exits
-      # when the server hangs up
-      Process.flag(:trap_exit, true)
 
       log =
         capture_log(fn ->

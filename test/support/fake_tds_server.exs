@@ -1,12 +1,19 @@
 defmodule Tds.FakeServer do
   @moduledoc false
+  alias Tds.Encoding.UCS2
+
   # Just enough of a SQL Server to get a client through PRELOGIN (optionally
   # with TLS, wrapped in PRELOGIN packets like the real thing), LOGIN7 and
   # the connection SET batch, then hand each query to a script.
   #
   # `script` is a list of steps run for each client query, in order:
   #   {:reply, packets} | {:close, packets} | :hang
-  # and `login: :close` hangs up after reading LOGIN7.
+  # and `login: :close` hangs up after reading LOGIN7. `redirect: port` plays
+  # an Azure gateway: it routes the client to 127.0.0.1:port and reports
+  # whether the client closes the leg (as {:gateway_leg, result}), hanging up
+  # itself if the client keeps it open.
+  #
+  # Pass a list of option lists to serve one connection after another.
 
   # DONE with the count bit set and 5 rows
   def done, do: <<0xFD, 0x10::little-16, 0xC1::little-16, 5::little-64>>
@@ -19,7 +26,8 @@ defmodule Tds.FakeServer do
     {:ok, listen} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
     {:ok, port} = :inet.port(listen)
     test = self()
-    server = spawn_link(fn -> serve(listen, test, opts) end)
+    connections = if Keyword.keyword?(opts), do: [opts], else: opts
+    server = spawn_link(fn -> Enum.each(connections, &serve(listen, test, &1)) end)
     {server, port}
   end
 
@@ -38,16 +46,20 @@ defmodule Tds.FakeServer do
     login7 = recv_message(conn)
     send(test, {:login7, login7})
 
-    case Keyword.get(opts, :login, :ok) do
+    login =
+      if port = opts[:redirect], do: {:redirect, port}, else: Keyword.get(opts, :login, :ok)
+
+    case login do
       :close ->
         close(conn)
 
+      {:redirect, port} ->
+        redirect(conn, port, test)
+
       :ok ->
         # LOGINACK, FEATUREEXTACK (FEDAUTH, no data) and DONE
-        ack = <<1, 0x74000004::32, 1, ?M, 0, 16, 0, 0, 0>>
-        loginack = <<0xAD, byte_size(ack)::little-16>> <> ack
         featureextack = <<0xAE, 0x02, 0::little-32, 0xFF>>
-        send_data(conn, packet(1, loginack <> featureextack <> done()))
+        send_data(conn, packet(1, loginack() <> featureextack <> done()))
 
         # connection SET statements
         _ = recv_message(conn)
@@ -55,6 +67,23 @@ defmodule Tds.FakeServer do
 
         run(conn, Keyword.get(opts, :script, []), test)
     end
+  end
+
+  # LOGINACK with a routing ENVCHANGE to 127.0.0.1:port
+  defp redirect(conn, port, test) do
+    host = UCS2.from_string("127.0.0.1")
+    routing = <<0x00, port::little-16, div(byte_size(host), 2)::little-16>> <> host
+    env = <<0x14, byte_size(routing)::little-16>> <> routing <> <<0, 0>>
+    envchange = <<0xE3, byte_size(env)::little-16>> <> env
+    send_data(conn, packet(1, loginack() <> envchange <> done()))
+
+    send(test, {:gateway_leg, recv(conn, 0, 500)})
+    close(conn)
+  end
+
+  defp loginack do
+    ack = <<1, 0x74000004::32, 1, ?M, 0, 16, 0, 0, 0>>
+    <<0xAD, byte_size(ack)::little-16>> <> ack
   end
 
   defp run(conn, [], test), do: send(test, {:server_done, recv(conn, 0, 1_000)})

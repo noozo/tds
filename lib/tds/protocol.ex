@@ -884,8 +884,11 @@ defmodule Tds.Protocol do
   def message(
         :login,
         msg_loginack(redirect: %{hostname: host, port: port}),
-        %{opts: opts} = s
+        %{opts: opts, sock: {mod, sock}} = s
       ) do
+    # The gateway leg is done with, close it before following the route
+    _ = mod.close(sock)
+
     opts
     |> Keyword.put(:hostname, host)
     |> Keyword.put(:port, port)
