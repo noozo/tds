@@ -184,6 +184,13 @@ the hostname check runs against the server that is actually reached.
 Only the Security Token workflow is supported: the driver does not acquire tokens
 itself (no ADAL/MSAL `FEDAUTHINFO` exchange).
 
+### Known limitations
+
+A connect can block indefinitely if the server stops responding during the TLS
+handshake or before it answers LOGIN7: the handshake runs with an `:infinity` timeout
+and the login response is read without one. This predates federated authentication
+and applies to every login.
+
 ## Limiting response size
 
 The driver buffers a whole response, across every result set, before decoding it.
