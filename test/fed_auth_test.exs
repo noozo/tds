@@ -112,6 +112,23 @@ defmodule FedAuthTest do
                Tds.Protocol.connect([access_token: ""] ++ @opts)
     end
 
+    test "warns once when the server certificate is not verified" do
+      opts = [access_token: "tok", ssl_opts: [verify: :verify_none]] ++ @opts
+      log = ExUnit.CaptureLog.capture_log(fn -> Tds.Protocol.connect(opts) end)
+
+      assert [_] = Regex.scan(~r/verify: :verify_none/, log)
+      refute log =~ "tok\""
+    end
+
+    test "does not warn when the server certificate is verified" do
+      for ssl_opts <- [[verify: :verify_peer], []] do
+        opts = [access_token: "tok", ssl_opts: ssl_opts] ++ @opts
+        log = ExUnit.CaptureLog.capture_log(fn -> Tds.Protocol.connect(opts) end)
+
+        refute log =~ "verify_none"
+      end
+    end
+
     test "returns an error naming only the exception when the token function raises" do
       opts = [access_token: fn -> raise "SECRET-BOOM" end] ++ @opts
 

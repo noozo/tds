@@ -85,18 +85,22 @@ defmodule Tds.Protocol do
       |> Enum.reject(fn {_k, v} -> is_nil(v) end)
 
     with {:ok, opts, access_token} <- resolve_access_token(opts) do
-      s = %__MODULE__{access_token: access_token}
+      connect_resolved(opts, access_token)
+    end
+  end
 
-      case opts[:instance] do
-        nil ->
-          connect(opts, s)
+  defp connect_resolved(opts, access_token) do
+    s = %__MODULE__{access_token: access_token}
 
-        _instance ->
-          case instance(opts, s) do
-            {:ok, s} -> connect(opts, s)
-            err -> {:error, err}
-          end
-      end
+    case opts[:instance] do
+      nil ->
+        connect(opts, s)
+
+      _instance ->
+        case instance(opts, s) do
+          {:ok, s} -> connect(opts, s)
+          err -> {:error, err}
+        end
     end
   end
 
@@ -112,13 +116,20 @@ defmodule Tds.Protocol do
 
         with :ok <- validate_access_token_ssl(opts),
              {:ok, token} <- fetch_access_token(token, timeout) do
+          warn_unverified_tls(opts)
           {:ok, Keyword.put(opts, :access_token, :REDACTED), token}
         end
     end
   end
 
-  defp put_access_token(opts, nil), do: opts
-  defp put_access_token(opts, token), do: Keyword.put(opts, :access_token, token)
+  defp warn_unverified_tls(opts) do
+    if opts[:ssl_opts][:verify] == :verify_none do
+      Logger.warning(
+        "Tds is sending an :access_token over TLS with verify: :verify_none, " <>
+          "so the server certificate is not checked and the token can be intercepted"
+      )
+    end
+  end
 
   # The token is a bearer credential, never send it over an unencrypted connection
   defp validate_access_token_ssl(opts) do
@@ -941,8 +952,8 @@ defmodule Tds.Protocol do
     |> Keyword.put(:hostname, host)
     |> Keyword.put(:port, port)
     |> Keyword.update(:ssl_opts, [], &route_ssl_opts(&1, host))
-    |> put_access_token(s.access_token)
-    |> connect()
+    # the routed login reuses the token resolved for this connect
+    |> connect_resolved(s.access_token)
     |> case do
       {:ok, s} -> {:ok, s}
       {:error, err} -> {:error, err, s}

@@ -199,7 +199,13 @@ defmodule ConnectionFailureTest do
       {_target, target_port} = FakeServer.start(tls: true)
       {_gateway, gateway_port} = FakeServer.start(tls: true, redirect: target_port)
 
-      capture_log(fn -> assert {:ok, _state} = Tds.Protocol.connect(token_opts(gateway_port)) end)
+      log =
+        capture_log(fn ->
+          assert {:ok, _state} = Tds.Protocol.connect(token_opts(gateway_port))
+        end)
+
+      # one connect, one verify_none warning, although it logs in twice
+      assert [_] = Regex.scan(~r/verify: :verify_none/, log)
 
       token = UCS2.from_string(@token)
       assert_received {:login7, gateway_login7}
