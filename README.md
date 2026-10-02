@@ -156,8 +156,9 @@ tuple. Functions and MFAs are called on every connect and return the token,
 `{:ok, token}` or `{:error, reason}`, so connections opened after the token expired get
 a fresh one. If the function returns `{:error, reason}`, raises, throws, exits or takes
 longer than `:connect_timeout` (default 15 seconds), the connect fails with a
-`Tds.Error` and the pool retries with its usual backoff. A raised exception is reported
-by its module name only, so its message never reaches the logs.
+`Tds.Error` and the pool retries with its usual backoff. A raised exception or an
+`{:error, reason}` struct is reported by its module name only (an atom reason as is,
+any other reason not at all), so secrets in it never reach the logs.
 
 ```elixir
 config :your_app, :tds_conn,

@@ -229,8 +229,17 @@ defmodule Tds.Protocol do
   defp normalize_access_token({:ok, token}) when is_binary(token) and token != "",
     do: {:ok, token}
 
-  defp normalize_access_token({:error, reason}),
-    do: {:error, Tds.Error.exception("unable to fetch access token: #{inspect(reason)}")}
+  # The reason may hold credentials, only its atom or struct name is reported
+  defp normalize_access_token({:error, reason}) do
+    message =
+      case reason do
+        %module{} -> "unable to fetch access token: #{inspect(module)}"
+        atom when is_atom(atom) -> "unable to fetch access token: #{inspect(atom)}"
+        _other -> "unable to fetch access token"
+      end
+
+    {:error, Tds.Error.exception(message)}
+  end
 
   defp normalize_access_token(_other),
     do: {:error, Tds.Error.exception("invalid :access_token, expected a non-empty string")}

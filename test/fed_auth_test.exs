@@ -174,6 +174,19 @@ defmodule FedAuthTest do
       assert_receive {:DOWN, ^ref, :process, ^resolver, _reason}, 1_000
     end
 
+    test "an {:error, reason} names at most the reason's atom or struct, never its values" do
+      for {reason, message} <- [
+            {%{client_secret: "S3CR3T"}, "unable to fetch access token"},
+            {{:http_error, "S3CR3T"}, "unable to fetch access token"},
+            {"S3CR3T", "unable to fetch access token"},
+            {%RuntimeError{message: "S3CR3T"}, "unable to fetch access token: RuntimeError"},
+            {:expired, "unable to fetch access token: :expired"}
+          ] do
+        opts = [access_token: fn -> {:error, reason} end] ++ @opts
+        assert {:error, %Tds.Error{message: ^message}} = Tds.Protocol.connect(opts)
+      end
+    end
+
     test "returns an error naming only the exception when the token function raises" do
       opts = [access_token: fn -> raise "SECRET-BOOM" end] ++ @opts
 
