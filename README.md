@@ -144,10 +144,35 @@ Requires connecting with a user with appropriate rights.
 More info [here](https://docs.microsoft.com/en-us/dotnet/framework/data/adonet/sql/snapshot-isolation-in-sql-server).
 
 
-## Federation Authentication
+## Federated Authentication
 
-This Authentication mechanism is not supported.
-This functionality requires specific environment to be developed.
+Azure SQL Database and Microsoft Fabric SQL endpoints accept a Microsoft Entra ID
+access token instead of a username and password. Acquire the token yourself
+(scope `https://database.windows.net/.default`) and pass it as `:access_token`.
+Username and password are ignored, and encryption is required.
+
+`:access_token` accepts a string, a zero-arity function or an `{module, function, args}`
+tuple. Functions and MFAs are called on every connect and must return the token or
+`{:ok, token}`, so connections opened after the token expired get a fresh one.
+
+```elixir
+config :your_app, :tds_conn,
+  hostname: "xxxx.datawarehouse.fabric.microsoft.com",
+  database: "my_warehouse",
+  access_token: {MyApp.Entra, :fetch_sql_token, []},
+  ssl: true,
+  ssl_opts: [
+    verify: :verify_peer,
+    cacerts: :public_key.cacerts_get(),
+    server_name_indication: ~c"xxxx.datawarehouse.fabric.microsoft.com",
+    customize_hostname_check: [
+      match_fun: :public_key.pkix_verify_hostname_match_fun(:https)
+    ]
+  ]
+```
+
+Only the Security Token workflow is supported: the driver does not acquire tokens
+itself (no ADAL/MSAL `FEDAUTHINFO` exchange).
 
 ## Data representation
 

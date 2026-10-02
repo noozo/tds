@@ -27,10 +27,21 @@ defmodule Tds do
           | {:database, String.t()}
           | {:username, String.t()}
           | {:password, String.t()}
+          | {:access_token, access_token()}
           | {:timeout, timeout()}
           | {:connect_timeout, timeout()}
           | {:execution_mode, :prepare_execute | :executesql}
           | DBConnection.start_option()
+
+  @typedoc """
+  A Microsoft Entra ID access token for federated authentication, or a
+  function / MFA returning `token` or `{:ok, token}` that is called on every
+  connect so pooled connections can pick up a refreshed token.
+  """
+  @type access_token ::
+          String.t()
+          | (-> String.t() | {:ok, String.t()} | {:error, term})
+          | {module(), atom(), [term()]}
 
   @type isolation_level ::
           :read_uncommitted
