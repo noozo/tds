@@ -174,6 +174,25 @@ config :your_app, :tds_conn,
 Only the Security Token workflow is supported: the driver does not acquire tokens
 itself (no ADAL/MSAL `FEDAUTHINFO` exchange).
 
+## Limiting response size
+
+The driver buffers a whole response, across every result set, before decoding it.
+Set `max_response_bytes: pos_integer()` to cap that buffer. The count covers the bytes
+read for one response, TDS packet headers included. Once it goes over the limit the
+driver stops reading, closes the connection (the rest of the response is still on the
+wire) and the query returns:
+
+```elixir
+{:error, %Tds.ResponseTooLargeError{
+   limit: 10_000_000,
+   received: 10_002_432,
+   message: "response exceeded max_response_bytes (limit 10000000 bytes)"
+ }}
+```
+
+`received` is the number of bytes read when the driver stopped. The pool opens a new
+connection for the next checkout. Without the option there is no limit.
+
 ## Data representation
 
 | TDS               | Elixir                                                                                     |

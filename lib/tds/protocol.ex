@@ -945,8 +945,8 @@ defmodule Tds.Protocol do
       {:disconnect, ex, s} ->
         {:disconnect, ex, %{s | opts: clean_opts(opts)}}
 
-      {:max_response_bytes, limit} ->
-        max_response_bytes_exceeded(limit, %{s | opts: clean_opts(opts)})
+      {:max_response_bytes, limit, received} ->
+        max_response_bytes_exceeded(limit, received, %{s | opts: clean_opts(opts)})
 
       buffer ->
         buffer
@@ -981,17 +981,22 @@ defmodule Tds.Protocol do
       |> IO.iodata_to_binary()
       |> decode(s)
     else
-      {:max_response_bytes, limit} -> max_response_bytes_exceeded(limit, s)
-      {:disconnect, _ex, _s} = res -> {0, res}
-      other -> other
+      {:max_response_bytes, limit, received} ->
+        max_response_bytes_exceeded(limit, received, s)
+
+      {:disconnect, _ex, _s} = res ->
+        {0, res}
+
+      other ->
+        other
     end
   end
 
   # The rest of the response is still on the wire, so the connection can't be
   # reused. Close it and let DBConnection drop it.
-  defp max_response_bytes_exceeded(limit, %{sock: {mod, sock}} = s) do
+  defp max_response_bytes_exceeded(limit, received, %{sock: {mod, sock}} = s) do
     _ = mod.close(sock)
-    {:disconnect, Tds.Error.exception("response exceeded max_response_bytes (#{limit})"), s}
+    {:disconnect, Tds.ResponseTooLargeError.exception(limit: limit, received: received), s}
   end
 
   defp msg_recv(%{sock: {mod, pid}} = s) do
@@ -1011,7 +1016,7 @@ defmodule Tds.Protocol do
     end
   catch
     {:error, error} -> {:disconnect, error, s}
-    {:max_response_bytes, _limit} = exceeded -> exceeded
+    {:max_response_bytes, _limit, _received} = exceeded -> exceeded
   end
 
   defp msg_recv({:done, buffer, _}, _received, _s) do
@@ -1054,8 +1059,11 @@ defmodule Tds.Protocol do
     received = received + byte_size(pkg)
 
     case opts[:max_response_bytes] do
-      limit when is_integer(limit) and received > limit -> throw({:max_response_bytes, limit})
-      _ -> received
+      limit when is_integer(limit) and received > limit ->
+        throw({:max_response_bytes, limit, received})
+
+      _ ->
+        received
     end
   end
 
