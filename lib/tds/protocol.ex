@@ -43,7 +43,8 @@ defmodule Tds.Protocol do
           query: nil | String.t(),
           transaction: transaction,
           env: env,
-          fed_auth_echo: boolean()
+          fed_auth_echo: boolean(),
+          access_token: nil | String.t()
         }
 
   defstruct sock: nil,
@@ -63,7 +64,10 @@ defmodule Tds.Protocol do
             },
             # FEDAUTHREQUIRED value from the server's PRELOGIN response,
             # echoed back in the LOGIN7 FEDAUTH feature extension
-            fed_auth_echo: false
+            fed_auth_echo: false,
+            # Resolved access token, only kept until login succeeds. It is
+            # redacted from opts and hidden from inspect.
+            access_token: nil
 
   @spec connect(opts :: Keyword.t()) :: {:ok, state :: t()} | {:error, Exception.t()}
   def connect(opts) do
@@ -75,9 +79,9 @@ defmodule Tds.Protocol do
       |> Keyword.put_new(:hostname, System.get_env("MSSQLHOST") || "localhost")
       |> Enum.reject(fn {_k, v} -> is_nil(v) end)
 
-    s = %__MODULE__{}
+    with {:ok, opts, access_token} <- resolve_access_token(opts) do
+      s = %__MODULE__{access_token: access_token}
 
-    with {:ok, opts} <- resolve_access_token(opts) do
       case opts[:instance] do
         nil ->
           connect(opts, s)
@@ -96,15 +100,18 @@ defmodule Tds.Protocol do
   defp resolve_access_token(opts) do
     case Keyword.fetch(opts, :access_token) do
       :error ->
-        {:ok, opts}
+        {:ok, opts, nil}
 
       {:ok, token} ->
         with :ok <- validate_access_token_ssl(opts),
              {:ok, token} <- fetch_access_token(token) do
-          {:ok, Keyword.put(opts, :access_token, token)}
+          {:ok, Keyword.put(opts, :access_token, :REDACTED), token}
         end
     end
   end
+
+  defp put_access_token(opts, nil), do: opts
+  defp put_access_token(opts, token), do: Keyword.put(opts, :access_token, token)
 
   # The token is a bearer credential, never send it over an unencrypted connection
   defp validate_access_token_ssl(opts) do
@@ -655,7 +662,12 @@ defmodule Tds.Protocol do
   end
 
   def login(%{opts: opts} = s) do
-    msg = msg_login(params: Keyword.put(opts, :fed_auth_echo, s.fed_auth_echo))
+    params =
+      opts
+      |> Keyword.put(:fed_auth_echo, s.fed_auth_echo)
+      |> Keyword.put(:access_token, s.access_token)
+
+    msg = msg_login(params: params)
 
     case login_send(msg, %{s | state: :login}) do
       {:ok, s} ->
@@ -877,6 +889,7 @@ defmodule Tds.Protocol do
     opts
     |> Keyword.put(:hostname, host)
     |> Keyword.put(:port, port)
+    |> put_access_token(s.access_token)
     |> connect()
     |> case do
       {:ok, s} -> {:ok, s}
@@ -885,7 +898,7 @@ defmodule Tds.Protocol do
   end
 
   def message(:login, msg_loginack(), %{opts: opts} = s) do
-    state = %{s | opts: clean_opts(opts)}
+    state = %{s | opts: clean_opts(opts), access_token: nil}
 
     opts
     |> conn_opts()
@@ -1336,4 +1349,24 @@ defmodule Tds.Protocol do
     |> Keyword.values()
     |> Enum.max()
   end
+end
+
+defimpl Inspect, for: Tds.Protocol do
+  # Protocol state ends up in crash reports and DBConnection errors, keep
+  # credentials out of it
+  @secrets [:password, :access_token, :proxy_password]
+
+  def inspect(s, opts) do
+    s = %{s | opts: redact(s.opts), access_token: s.access_token && :REDACTED}
+    Inspect.Any.inspect(s, opts)
+  end
+
+  defp redact(opts) when is_list(opts) do
+    Enum.map(opts, fn
+      {key, _value} when key in @secrets -> {key, :REDACTED}
+      other -> other
+    end)
+  end
+
+  defp redact(other), do: other
 end

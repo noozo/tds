@@ -81,8 +81,8 @@ defmodule Tds.FakeServer do
   defp tls_handshake(sock) do
     %{server_config: server_config} =
       :public_key.pkix_test_data(%{
-        server_chain: %{root: [], intermediates: [], peer: []},
-        client_chain: %{root: [], intermediates: [], peer: []}
+        server_chain: %{root: cert_opts(), intermediates: [], peer: cert_opts()},
+        client_chain: %{root: cert_opts(), intermediates: [], peer: cert_opts()}
       })
 
     {:ok, tls} = GenServer.start_link(Tds.Tls, {sock, []})
@@ -93,13 +93,15 @@ defmodule Tds.FakeServer do
         [
           versions: [:"tlsv1.2"],
           active: false,
-          cb_info: {Tds.Tls, :tcp, :tcp_closed, :tcp_error}
+          cb_info: {Tds.FakeServer.Transport, :tcp, :tcp_closed, :tcp_error}
         ]
 
     {:ok, ssl} = :ssl.handshake(sock, ssl_opts, 5_000)
     GenServer.cast(tls, :handshake_complete)
     ssl
   end
+
+  defp cert_opts, do: [key: {:rsa, 2048, 65_537}, digest: :sha256]
 
   # Reads one client message, packet by packet, up to the EOM status bit
   def recv_message(conn, acc \\ <<>>) do
@@ -116,4 +118,21 @@ defmodule Tds.FakeServer do
 
   defp close({:gen_tcp, sock}), do: :gen_tcp.close(sock)
   defp close({:ssl, sock}), do: :ssl.close(sock)
+end
+
+defmodule Tds.FakeServer.Transport do
+  @moduledoc false
+  # Tds.Tls as an :ssl server transport, which also needs port/1
+
+  defdelegate send(socket, data), to: Tds.Tls
+  defdelegate recv(socket, length), to: Tds.Tls
+  defdelegate recv(socket, length, timeout), to: Tds.Tls
+  defdelegate controlling_process(socket, pid), to: Tds.Tls
+  defdelegate setopts(socket, opts), to: Tds.Tls
+  defdelegate getopts(socket, opts), to: :inet
+  defdelegate peername(socket), to: :inet
+  defdelegate sockname(socket), to: :inet
+  defdelegate port(socket), to: :inet
+  defdelegate close(socket), to: :gen_tcp
+  defdelegate shutdown(socket, how), to: :gen_tcp
 end

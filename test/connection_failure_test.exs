@@ -6,6 +6,7 @@ defmodule ConnectionFailureTest do
 
   import ExUnit.CaptureLog
 
+  alias Tds.Encoding.UCS2
   alias Tds.FakeServer
 
   setup do
@@ -59,5 +60,111 @@ defmodule ConnectionFailureTest do
 
     assert log =~ "timed out"
     refute log =~ "bad return value"
+  end
+
+  describe "with an access token" do
+    @token "SECRET-TOKEN-123"
+
+    defp token_opts(port) do
+      [
+        hostname: "127.0.0.1",
+        port: port,
+        ssl: true,
+        ssl_opts: [verify: :verify_none],
+        access_token: fn -> @token end,
+        execution_mode: :executesql,
+        backoff_type: :stop,
+        pool_size: 1
+      ]
+    end
+
+    defp refute_token(text) do
+      refute text =~ @token
+      refute text =~ UCS2.from_string(@token)
+    end
+
+    test "LOGIN7 carries the token over TLS and the state never shows it" do
+      {_server, port} =
+        FakeServer.start(tls: true, script: [{:reply, [FakeServer.packet(1, FakeServer.done())]}])
+
+      log =
+        capture_log(fn ->
+          assert {:ok, state} = Tds.Protocol.connect(token_opts(port))
+          refute_token(inspect(state))
+          assert state.access_token == nil
+          assert state.opts[:access_token] == :REDACTED
+        end)
+
+      # FEDAUTH feature extension with the UTF-16LE token, echo clear
+      assert_received {:login7, login7}
+      token = UCS2.from_string(@token)
+
+      assert login7 =~
+               <<0x02, byte_size(token) + 5::little-32, 0x02, byte_size(token)::little-32>> <>
+                 token <> <<0xFF>>
+
+      refute_token(log)
+    end
+
+    test "a failure mid-login does not show the token" do
+      {_server, port} = FakeServer.start(tls: true, login: :close)
+      # the Tds.Tls transport is linked to the connecting process and exits
+      # when the server hangs up
+      Process.flag(:trap_exit, true)
+
+      log =
+        capture_log(fn ->
+          assert {:error, error} = Tds.Protocol.connect(token_opts(port))
+          assert %Tds.Error{message: "Connection failed to receive packet due :closed"} = error
+          refute_token(inspect(error))
+        end)
+
+      refute_token(log)
+    end
+
+    test "a socket closed mid-query does not show the token" do
+      partial = FakeServer.packet(0, <<0::size(100)-unit(8)>>)
+      {_server, port} = FakeServer.start(tls: true, script: [{:close, [partial]}])
+      {:ok, pid} = Tds.start_link(token_opts(port))
+
+      log =
+        capture_log(fn ->
+          assert {:error, %Tds.Error{message: "Connection failed to receive packet due :closed"}} =
+                   Tds.query(pid, "SELECT 1", [])
+
+          Process.sleep(100)
+        end)
+
+      refute log =~ "bad return value"
+      refute_token(log)
+    end
+
+    test "a query timeout does not show the token" do
+      {_server, port} = FakeServer.start(tls: true, script: [:hang])
+      {:ok, pid} = Tds.start_link(token_opts(port))
+
+      log =
+        capture_log(fn ->
+          assert {:error, %Tds.Error{}} = Tds.query(pid, "SELECT 1", [], timeout: 200)
+          Process.sleep(100)
+        end)
+
+      assert log =~ "timed out"
+      refute log =~ "bad return value"
+      refute_token(log)
+    end
+
+    test "inspect never shows credentials" do
+      state = %Tds.Protocol{
+        opts: [password: "pw-123", access_token: @token, proxy_password: "proxy-123"],
+        access_token: @token
+      }
+
+      inspected = inspect(state)
+      refute_token(inspected)
+      refute inspected =~ "pw-123"
+      refute inspected =~ "proxy-123"
+      assert inspected =~ "%Tds.Protocol{"
+    end
   end
 end
