@@ -155,5 +155,29 @@ defmodule Login7Test do
       assert :binary.part(payload, byte_size(payload) - 6_001, 6_001) ==
                :binary.copy(<<?a, 0>>, 3000) <> <<0xFF>>
     end
+
+    test "a 6000 character token spans three packets with EOM only on the last" do
+      token = String.duplicate("a", 6000)
+
+      packets =
+        %{@fed_auth_login | fed_auth: %{token: token, echo: false}}
+        |> Login7.encode()
+        |> Enum.map(&IO.iodata_to_binary/1)
+
+      headers =
+        for <<type, status, length::16, _spid::16, id, _window>> <> _ <- packets,
+            do: {type, status, length, id}
+
+      # 4088 bytes of data + 8 byte header per full packet, status 0x01 (EOM) last
+      assert [{0x10, 0, 4096, 1}, {0x10, 0, 4096, 2}, {0x10, 1, last_length, 3}] = headers
+      assert last_length == byte_size(List.last(packets))
+
+      payload = Enum.map_join(packets, fn <<_header::binary-8, data::binary>> -> data end)
+      <<length::little-32, _::binary>> = payload
+      assert length == byte_size(payload)
+
+      assert :binary.part(payload, byte_size(payload) - 12_001, 12_001) ==
+               :binary.copy(<<?a, 0>>, 6000) <> <<0xFF>>
+    end
   end
 end
