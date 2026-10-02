@@ -75,9 +75,12 @@ defmodule FedAuthTest do
     @opts [hostname: "127.0.0.1", port: 1, ssl: true, timeout: 1_000]
 
     test "refuses to send the token without encryption" do
-      for ssl <- [false, :not_supported] do
-        opts = Keyword.merge(@opts, ssl: ssl, access_token: fn -> flunk("resolved") end)
+      token = fn -> flunk("resolved") end
+      without_ssl = [access_token: token] ++ Keyword.delete(@opts, :ssl)
 
+      for opts <- [
+            without_ssl | for(ssl <- [false, :not_supported, nil], do: [ssl: ssl] ++ without_ssl)
+          ] do
         assert {:error, %Tds.Error{message: ":access_token requires ssl" <> _}} =
                  Tds.Protocol.connect(opts)
       end

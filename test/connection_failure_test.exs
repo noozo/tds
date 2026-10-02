@@ -81,6 +81,13 @@ defmodule ConnectionFailureTest do
     end)
   end
 
+  test "a close after the connection SET batch fails the connect with a ConnectionError" do
+    {_server, port} = FakeServer.start(set_batch: :close)
+
+    opts = [hostname: "127.0.0.1", port: port, username: "u", password: "p", ssl: false]
+    assert {:error, %DBConnection.ConnectionError{message: @closed}} = Tds.Protocol.connect(opts)
+  end
+
   describe "on a socket the client already closed" do
     setup do
       {_server, port} = FakeServer.start(script: [])
@@ -152,6 +159,55 @@ defmodule ConnectionFailureTest do
       assert login7 =~
                <<0x02, byte_size(token) + 5::little-32, 0x02, byte_size(token)::little-32>> <>
                  token <> <<0xFF>>
+
+      refute_token(log)
+    end
+
+    test "LOGIN7 echoes the server's FEDAUTHREQUIRED" do
+      for {required, options} <- [{1, 0x03}, {0, 0x02}] do
+        {_server, port} = FakeServer.start(tls: true, fed_auth_required: required)
+
+        capture_log(fn -> assert {:ok, _state} = Tds.Protocol.connect(token_opts(port)) end)
+
+        assert_received {:login7, login7}
+        token = UCS2.from_string(@token)
+
+        assert login7 =~
+                 <<0x02, byte_size(token) + 5::little-32, options, byte_size(token)::little-32>> <>
+                   token
+      end
+    end
+
+    test "a redirect sends the token to the routed server" do
+      {_target, target_port} = FakeServer.start(tls: true)
+      {_gateway, gateway_port} = FakeServer.start(tls: true, redirect: target_port)
+
+      capture_log(fn -> assert {:ok, _state} = Tds.Protocol.connect(token_opts(gateway_port)) end)
+
+      token = UCS2.from_string(@token)
+      assert_received {:login7, gateway_login7}
+      assert_received {:login7, routed_login7}
+      assert gateway_login7 =~ token
+      assert routed_login7 =~ token
+    end
+
+    test "a live connection's state never shows the token or password" do
+      {_server, port} = FakeServer.start(tls: true)
+      opts = token_opts(port) ++ [password: "pw-123", connection_listeners: [self()]]
+
+      log =
+        capture_log(fn ->
+          {:ok, _pool} = Tds.start_link(opts)
+          assert_receive {:connected, conn}, 5_000
+
+          # DBConnection keeps its start options in its own state, only the
+          # driver's part is checked
+          {:no_state, %{state: %Tds.Protocol{} = state}} = :sys.get_state(conn)
+          inspected = inspect(state, limit: :infinity)
+          assert inspected =~ "%Tds.Protocol{"
+          refute_token(inspected)
+          refute inspected =~ "pw-123"
+        end)
 
       refute_token(log)
     end

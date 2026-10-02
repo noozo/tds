@@ -8,7 +8,9 @@ defmodule Tds.FakeServer do
   #
   # `script` is a list of steps run for each client query, in order:
   #   {:reply, packets} | {:close, packets} | :hang
-  # and `login: :close` hangs up after reading LOGIN7. `redirect: port` plays
+  # and `login: :close` hangs up after reading LOGIN7, `set_batch: :close`
+  # after reading the connection SET batch. `fed_auth_required: 0 | 1` adds
+  # FEDAUTHREQUIRED to the PRELOGIN response. `redirect: port` plays
   # an Azure gateway: it routes the client to 127.0.0.1:port and reports
   # whether the client closes the leg (as {:gateway_leg, result}), hanging up
   # itself if the client keeps it open.
@@ -35,11 +37,11 @@ defmodule Tds.FakeServer do
     {:ok, sock} = :gen_tcp.accept(listen)
     tls? = Keyword.get(opts, :tls, false)
 
-    # PRELOGIN: VERSION and ENCRYPTION (ON with TLS, NOT_SUP without)
+    # PRELOGIN: VERSION, ENCRYPTION (ON with TLS, NOT_SUP without) and
+    # optionally FEDAUTHREQUIRED
     _ = recv_message({:gen_tcp, sock})
     encryption = if tls?, do: 0x01, else: 0x02
-    prelogin = <<0x00, 11::16, 6::16, 0x01, 17::16, 1::16, 0xFF, 16, 0, 0, 0, 0, 0, encryption>>
-    :ok = :gen_tcp.send(sock, packet(1, prelogin))
+    :ok = :gen_tcp.send(sock, packet(1, prelogin(encryption, opts[:fed_auth_required])))
 
     conn = if tls?, do: {:ssl, tls_handshake(sock)}, else: {:gen_tcp, sock}
 
@@ -63,10 +65,23 @@ defmodule Tds.FakeServer do
 
         # connection SET statements
         _ = recv_message(conn)
-        send_data(conn, packet(1, done()))
 
-        run(conn, Keyword.get(opts, :script, []), test)
+        if opts[:set_batch] == :close do
+          close(conn)
+        else
+          send_data(conn, packet(1, done()))
+          run(conn, Keyword.get(opts, :script, []), test)
+        end
     end
+  end
+
+  defp prelogin(encryption, nil) do
+    <<0x00, 11::16, 6::16, 0x01, 17::16, 1::16, 0xFF, 16, 0, 0, 0, 0, 0, encryption>>
+  end
+
+  defp prelogin(encryption, fed_auth_required) do
+    <<0x00, 16::16, 6::16, 0x01, 22::16, 1::16, 0x06, 23::16, 1::16, 0xFF, 16, 0, 0, 0, 0, 0,
+      encryption, fed_auth_required>>
   end
 
   # LOGINACK with a routing ENVCHANGE to 127.0.0.1:port
