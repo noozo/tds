@@ -36,8 +36,10 @@ defmodule Tds do
 
   @typedoc """
   A Microsoft Entra ID access token for federated authentication, or a
-  function / MFA returning `token` or `{:ok, token}` that is called on every
-  connect so pooled connections can pick up a refreshed token.
+  function / MFA returning `token`, `{:ok, token}` or `{:error, reason}` that is
+  called on every connect so pooled connections can pick up a refreshed token.
+  A function that fails, raises or runs past `:connect_timeout` fails the
+  connect, and the pool backs off and retries.
   """
   @type access_token ::
           String.t()

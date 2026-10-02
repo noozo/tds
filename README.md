@@ -152,8 +152,12 @@ access token instead of a username and password. Acquire the token yourself
 Username and password are ignored, and encryption is required.
 
 `:access_token` accepts a string, a zero-arity function or an `{module, function, args}`
-tuple. Functions and MFAs are called on every connect and must return the token or
-`{:ok, token}`, so connections opened after the token expired get a fresh one.
+tuple. Functions and MFAs are called on every connect and return the token,
+`{:ok, token}` or `{:error, reason}`, so connections opened after the token expired get
+a fresh one. If the function returns `{:error, reason}`, raises, throws, exits or takes
+longer than `:connect_timeout` (default 15 seconds), the connect fails with a
+`Tds.Error` and the pool retries with its usual backoff. A raised exception is reported
+by its module name only, so its message never reaches the logs.
 
 ```elixir
 config :your_app, :tds_conn,

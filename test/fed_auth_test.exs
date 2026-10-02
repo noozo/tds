@@ -108,5 +108,49 @@ defmodule FedAuthTest do
       assert {:error, %Tds.Error{message: "invalid :access_token" <> _}} =
                Tds.Protocol.connect([access_token: ""] ++ @opts)
     end
+
+    test "returns an error naming only the exception when the token function raises" do
+      opts = [access_token: fn -> raise "SECRET-BOOM" end] ++ @opts
+
+      assert {:error, %Tds.Error{message: message}} = Tds.Protocol.connect(opts)
+      assert message == "access token could not be fetched: RuntimeError"
+    end
+
+    test "returns an error when the token function throws or exits" do
+      for fun <- [fn -> throw(:boom) end, fn -> exit(:boom) end] do
+        assert {:error, %Tds.Error{message: "access token could not be fetched: " <> kind}} =
+                 Tds.Protocol.connect([access_token: fun] ++ @opts)
+
+        assert kind in ["throw", "exit"]
+      end
+    end
+
+    test "gives up on a token function slower than connect_timeout" do
+      opts = [access_token: fn -> Process.sleep(5_000) end, connect_timeout: 50] ++ @opts
+
+      assert {:error, %Tds.Error{message: message}} = Tds.Protocol.connect(opts)
+      assert message == "access token could not be fetched: timed out after 50ms"
+    end
+
+    @tag :capture_log
+    test "a raising token function leaves the pool alive and backs off" do
+      parent = self()
+
+      token = fn ->
+        send(parent, :token_called)
+        raise "SECRET-BOOM"
+      end
+
+      {:ok, pool} =
+        Tds.start_link(
+          [access_token: token, pool_size: 1, backoff_min: 10, backoff_max: 20] ++ @opts
+        )
+
+      for _ <- 1..3, do: assert_receive(:token_called, 1_000)
+      assert Process.alive?(pool)
+
+      assert {:error, %DBConnection.ConnectionError{}} =
+               Tds.query(pool, "SELECT 1", [], queue_target: 10, queue_interval: 10, timeout: 50)
+    end
   end
 end

@@ -8,6 +8,7 @@ defmodule Tds.Protocol do
   use DBConnection
 
   @timeout 5_000
+  @connect_timeout 15_000
   @sock_opts [packet: :raw, mode: :binary, active: false]
   @trans_levels [
     :read_uncommitted,
@@ -103,8 +104,10 @@ defmodule Tds.Protocol do
         {:ok, opts, nil}
 
       {:ok, token} ->
+        timeout = Keyword.get(opts, :connect_timeout, @connect_timeout)
+
         with :ok <- validate_access_token_ssl(opts),
-             {:ok, token} <- fetch_access_token(token) do
+             {:ok, token} <- fetch_access_token(token, timeout) do
           {:ok, Keyword.put(opts, :access_token, :REDACTED), token}
         end
     end
@@ -122,12 +125,53 @@ defmodule Tds.Protocol do
     end
   end
 
-  defp fetch_access_token(fun) when is_function(fun, 0), do: normalize_access_token(fun.())
+  # A function or MFA runs in its own process, so a raise, throw, exit or hang
+  # becomes a connect error (and DBConnection backs off) instead of crashing
+  # the connection process. Only the exception module is reported, its
+  # message could carry a secret.
+  defp fetch_access_token(fun, timeout) when is_function(fun, 0),
+    do: call_access_token(fun, timeout)
 
-  defp fetch_access_token({mod, fun, args}) when is_atom(mod) and is_atom(fun) and is_list(args),
-    do: normalize_access_token(apply(mod, fun, args))
+  defp fetch_access_token({mod, fun, args}, timeout)
+       when is_atom(mod) and is_atom(fun) and is_list(args),
+       do: call_access_token(fn -> apply(mod, fun, args) end, timeout)
 
-  defp fetch_access_token(token), do: normalize_access_token(token)
+  defp fetch_access_token(token, _timeout), do: normalize_access_token(token)
+
+  defp call_access_token(fun, timeout) do
+    {pid, ref} =
+      spawn_monitor(fn ->
+        result =
+          try do
+            {:ok, fun.()}
+          rescue
+            exception -> {:failed, inspect(exception.__struct__)}
+          catch
+            kind, _reason -> {:failed, Atom.to_string(kind)}
+          end
+
+        exit({:access_token, result})
+      end)
+
+    receive do
+      {:DOWN, ^ref, :process, ^pid, {:access_token, {:ok, token}}} ->
+        normalize_access_token(token)
+
+      {:DOWN, ^ref, :process, ^pid, {:access_token, {:failed, reason}}} ->
+        access_token_failed(reason)
+
+      {:DOWN, ^ref, :process, ^pid, _reason} ->
+        access_token_failed("exit")
+    after
+      timeout ->
+        Process.demonitor(ref, [:flush])
+        Process.exit(pid, :kill)
+        access_token_failed("timed out after #{timeout}ms")
+    end
+  end
+
+  defp access_token_failed(reason),
+    do: {:error, Tds.Error.exception("access token could not be fetched: #{reason}")}
 
   defp normalize_access_token(token) when is_binary(token) and token != "", do: {:ok, token}
 
