@@ -154,6 +154,21 @@ defmodule FedAuthTest do
       refute log =~ "SECRET-TOKEN-123"
     end
 
+    test "a token function past connect_timeout is killed" do
+      parent = self()
+
+      token = fn ->
+        send(parent, {:resolver, self()})
+        Process.sleep(:infinity)
+      end
+
+      assert {:error, %Tds.Error{message: "access token could not be fetched: timed out" <> _}} =
+               Tds.Protocol.connect([access_token: token, connect_timeout: 50] ++ @opts)
+
+      assert_received {:resolver, resolver}
+      refute Process.alive?(resolver)
+    end
+
     test "the resolver stops when the connecting process dies" do
       parent = self()
 

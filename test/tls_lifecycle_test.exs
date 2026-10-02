@@ -135,4 +135,33 @@ defmodule TlsLifecycleTest do
     assert Enum.filter(links, &(is_pid(&1) and Process.alive?(&1))) == []
     Process.exit(client, :kill)
   end
+
+  describe "Tds.Tls on a socket event" do
+    setup do
+      {:ok, listen} = :gen_tcp.listen(0, [:binary, active: false])
+      {:ok, port} = :inet.port(listen)
+      {:ok, sock} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false])
+      {:ok, tls} = GenServer.start(Tds.Tls, {sock, []})
+      :ok = GenServer.call(tls, {:controlling_process, self()})
+      %{sock: sock, tls: tls, ref: Process.monitor(tls)}
+    end
+
+    for event <- [:tcp_closed, :ssl_closed] do
+      test "#{event} is passed on and stops it normally", %{sock: sock, tls: tls, ref: ref} do
+        send(tls, {unquote(event), sock})
+
+        assert_receive {unquote(event), ^sock}
+        assert_receive {:DOWN, ^ref, :process, ^tls, :normal}
+      end
+    end
+
+    for event <- [:tcp_error, :ssl_error] do
+      test "#{event} is passed on and stops it normally", %{sock: sock, tls: tls, ref: ref} do
+        send(tls, {unquote(event), sock, :econnreset})
+
+        assert_receive {unquote(event), ^sock, :econnreset}
+        assert_receive {:DOWN, ^ref, :process, ^tls, :normal}
+      end
+    end
+  end
 end
