@@ -45,7 +45,8 @@ defmodule Tds.Protocol do
           transaction: transaction,
           env: env,
           fed_auth_echo: boolean(),
-          access_token: nil | String.t()
+          access_token: nil | String.t(),
+          max_response_bytes: nil | pos_integer()
         }
 
   defstruct sock: nil,
@@ -68,7 +69,10 @@ defmodule Tds.Protocol do
             fed_auth_echo: false,
             # Resolved access token, only kept until login succeeds. It is
             # redacted from opts and hidden from inspect.
-            access_token: nil
+            access_token: nil,
+            # :max_response_bytes, set once login is done so the cap only
+            # applies to query responses
+            max_response_bytes: nil
 
   @spec connect(opts :: Keyword.t()) :: {:ok, state :: t()} | {:error, Exception.t()}
   def connect(opts) do
@@ -715,7 +719,7 @@ defmodule Tds.Protocol do
 
     case login_send(msg, %{s | state: :login}) do
       {:ok, s} ->
-        {:ok, %{s | state: :ready}}
+        {:ok, %{s | state: :ready, max_response_bytes: opts[:max_response_bytes]}}
 
       err ->
         err
@@ -1013,9 +1017,6 @@ defmodule Tds.Protocol do
       {:disconnect, ex, s} ->
         {:disconnect, ex, %{s | opts: clean_opts(opts)}}
 
-      {:max_response_bytes, limit, received} ->
-        max_response_bytes_exceeded(limit, received, %{s | opts: clean_opts(opts)})
-
       buffer ->
         buffer
         |> IO.iodata_to_binary()
@@ -1127,11 +1128,12 @@ defmodule Tds.Protocol do
   end
 
   # Bytes read from the socket for the current response, packet headers
-  # included. Stops reading once :max_response_bytes is exceeded.
-  defp count_received(received, pkg, %{opts: opts}) do
+  # included (decrypted bytes over TLS). Stops reading once
+  # :max_response_bytes is exceeded.
+  defp count_received(received, pkg, s) do
     received = received + byte_size(pkg)
 
-    case opts[:max_response_bytes] do
+    case s.max_response_bytes do
       limit when is_integer(limit) and received > limit ->
         throw({:max_response_bytes, limit, received})
 

@@ -197,9 +197,19 @@ defmodule Tds do
   end
 
   defp default(opts) do
+    validate_max_response_bytes!(opts[:max_response_bytes])
+
     opts
     |> Keyword.put_new(:idle_timeout, @timeout)
     |> Keyword.put_new(:execution_mode, @execution_mode)
+  end
+
+  defp validate_max_response_bytes!(nil), do: :ok
+  defp validate_max_response_bytes!(limit) when is_integer(limit) and limit > 0, do: :ok
+
+  defp validate_max_response_bytes!(limit) do
+    raise ArgumentError,
+          "expected :max_response_bytes to be a positive integer or nil, got: #{inspect(limit)}"
   end
 
   @doc """

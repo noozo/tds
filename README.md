@@ -181,10 +181,12 @@ itself (no ADAL/MSAL `FEDAUTHINFO` exchange).
 ## Limiting response size
 
 The driver buffers a whole response, across every result set, before decoding it.
-Set `max_response_bytes: pos_integer()` to cap that buffer. The count covers the bytes
-read for one response, TDS packet headers included. Once it goes over the limit the
-driver stops reading, closes the connection (the rest of the response is still on the
-wire) and the query returns:
+Set `max_response_bytes: pos_integer()` to cap that buffer (anything else but `nil`
+raises `ArgumentError` at `start_link`). The cap applies to query responses only, not
+to the PRELOGIN, LOGIN7 and session setup exchanges of a connect. The count covers the
+bytes read for one response, TDS packet headers included; over TLS these are the
+decrypted bytes. Once it goes over the limit the driver stops reading, closes the
+connection (the rest of the response is still on the wire) and the query returns:
 
 ```elixir
 {:error, %Tds.ResponseTooLargeError{
