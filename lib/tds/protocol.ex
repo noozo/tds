@@ -381,7 +381,7 @@ defmodule Tds.Protocol do
           | {:error | :disconnect, Exception.t(), new_state :: t()}
   def handle_close(query, opts, s) do
     params = opts[:parameters]
-    send_close(query, params, s)
+    send_close(query, params, %{s | state: :executing})
   end
 
   @spec handle_begin(Keyword.t(), t) ::
@@ -544,26 +544,25 @@ defmodule Tds.Protocol do
         :gen_tcp.connect(host, port, sock_opts, timeout)
       end
 
-    # Initalize TCP connection with the SQL Server
-    with {:ok, sock} <- connection_result,
-         {:ok, buffers} <- :inet.getopts(sock, [:sndbuf, :recbuf, :buffer]),
-         :ok <- :inet.setopts(sock, buffer: max_buf_size(buffers)) do
-      # Send Prelogin message to SQL Server
-      case send_prelogin(%{s | sock: {:gen_tcp, sock}}) do
-        # close through the transport in use, which is TLS once PRELOGIN
-        # negotiated encryption
-        {:error, error, state} ->
-          disconnect(error, state)
-          {:error, error}
+    # Initialize TCP connection with the SQL Server
+    case connection_result do
+      {:ok, sock} ->
+        with {:ok, buffers} <- :inet.getopts(sock, [:sndbuf, :recbuf, :buffer]),
+             :ok <- :inet.setopts(sock, buffer: max_buf_size(buffers)),
+             {:ok, s} <- send_prelogin(%{s | sock: {:gen_tcp, sock}}) do
+          {:ok, s}
+        else
+          {error_or_disconnect, exception, state}
+          when error_or_disconnect in [:error, :disconnect] ->
+            # PRELOGIN may have upgraded the connection to TLS.
+            disconnect(exception, state)
+            {:error, exception}
 
-        {:disconnect, error, state} ->
-          disconnect(error, state)
-          {:error, error}
+          {:error, error} ->
+            :gen_tcp.close(sock)
+            {:error, %Tds.Error{message: "tcp connect: #{error}"}}
+        end
 
-        other ->
-          other
-      end
-    else
       {:error, error} ->
         {:error, %Tds.Error{message: "tcp connect: #{error}"}}
     end
@@ -631,7 +630,7 @@ defmodule Tds.Protocol do
     server =
       data
       |> String.split(";;")
-      |> Enum.slice(0..-2//-1)
+      |> Enum.drop(-1)
       |> Enum.reduce([], fn str, acc ->
         server =
           str
