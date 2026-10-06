@@ -8,6 +8,7 @@ defmodule Tds.Protocol do
   use DBConnection
 
   @timeout 5_000
+  @connect_timeout 15_000
   @sock_opts [packet: :raw, mode: :binary, active: false]
   @trans_levels [
     :read_uncommitted,
@@ -42,7 +43,10 @@ defmodule Tds.Protocol do
           result: nil | list(),
           query: nil | String.t(),
           transaction: transaction,
-          env: env
+          env: env,
+          fed_auth_echo: boolean(),
+          access_token: nil | String.t(),
+          max_response_bytes: nil | pos_integer()
         }
 
   defstruct sock: nil,
@@ -59,7 +63,16 @@ defmodule Tds.Protocol do
               savepoint: 0,
               collation: %Tds.Protocol.Collation{},
               packetsize: 4096
-            }
+            },
+            # FEDAUTHREQUIRED value from the server's PRELOGIN response,
+            # echoed back in the LOGIN7 FEDAUTH feature extension
+            fed_auth_echo: false,
+            # Resolved access token, only kept until login succeeds. It is
+            # redacted from opts and hidden from inspect.
+            access_token: nil,
+            # :max_response_bytes, set once login is done so the cap only
+            # applies to query responses
+            max_response_bytes: nil
 
   @spec connect(opts :: Keyword.t()) :: {:ok, state :: t()} | {:error, Exception.t()}
   def connect(opts) do
@@ -71,7 +84,13 @@ defmodule Tds.Protocol do
       |> Keyword.put_new(:hostname, System.get_env("MSSQLHOST") || "localhost")
       |> Enum.reject(fn {_k, v} -> is_nil(v) end)
 
-    s = %__MODULE__{}
+    with {:ok, opts, access_token} <- resolve_access_token(opts) do
+      connect_resolved(opts, access_token)
+    end
+  end
+
+  defp connect_resolved(opts, access_token) do
+    s = %__MODULE__{access_token: access_token}
 
     case opts[:instance] do
       nil ->
@@ -84,6 +103,146 @@ defmodule Tds.Protocol do
         end
     end
   end
+
+  # The access token is resolved on every connect, so a function or MFA can
+  # hand out a fresh token when the pool (re)connects after the last one expired.
+  defp resolve_access_token(opts) do
+    case Keyword.fetch(opts, :access_token) do
+      :error ->
+        {:ok, opts, nil}
+
+      {:ok, token} ->
+        timeout = Keyword.get(opts, :connect_timeout, @connect_timeout)
+
+        with :ok <- validate_access_token_ssl(opts),
+             {:ok, token} <- fetch_access_token(token, timeout) do
+          warn_unverified_tls(opts)
+          {:ok, Keyword.put(opts, :access_token, :REDACTED), token}
+        end
+    end
+  end
+
+  defp warn_unverified_tls(opts) do
+    if opts[:ssl_opts][:verify] == :verify_none do
+      Logger.warning(
+        "Tds is sending an :access_token over TLS with verify: :verify_none, " <>
+          "so the server certificate is not checked and the token can be intercepted"
+      )
+    end
+  end
+
+  # The token is a bearer credential, never send it over an unencrypted connection
+  defp validate_access_token_ssl(opts) do
+    if opts[:ssl] in [true, :required, :on] do
+      :ok
+    else
+      {:error, Tds.Error.exception(":access_token requires ssl: true (or :required)")}
+    end
+  end
+
+  # A function or MFA runs in its own process, so a raise, throw, exit or hang
+  # becomes a connect error (and DBConnection backs off) instead of crashing
+  # the connection process. Only the exception module is reported, its
+  # message could carry a secret.
+  defp fetch_access_token(fun, timeout) when is_function(fun, 0),
+    do: call_access_token(fun, timeout)
+
+  defp fetch_access_token({mod, fun, args}, timeout)
+       when is_atom(mod) and is_atom(fun) and is_list(args),
+       do: call_access_token(fn -> apply(mod, fun, args) end, timeout)
+
+  defp fetch_access_token(token, _timeout), do: normalize_access_token(token)
+
+  defp call_access_token(fun, timeout) do
+    parent = self()
+    tag = make_ref()
+
+    # The result goes back as a message and the resolver exits :normal, so
+    # the token never travels in an exit signal to processes the function
+    # linked to
+    {pid, ref} =
+      spawn_monitor(fn ->
+        watch_parent(parent, self())
+
+        result =
+          try do
+            {:ok, fun.()}
+          rescue
+            exception -> {:failed, inspect(exception.__struct__)}
+          catch
+            kind, _reason -> {:failed, Atom.to_string(kind)}
+          end
+
+        send(parent, {tag, result})
+      end)
+
+    receive do
+      {^tag, result} ->
+        Process.demonitor(ref, [:flush])
+
+        case result do
+          {:ok, token} -> normalize_access_token(token)
+          {:failed, reason} -> access_token_failed(reason)
+        end
+
+      {:DOWN, ^ref, :process, ^pid, _reason} ->
+        access_token_failed("exit")
+    after
+      timeout ->
+        Process.exit(pid, :kill)
+
+        # a result sent just before the kill arrives ahead of :DOWN, drop it
+        # so the token does not linger in this mailbox
+        receive do
+          {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+        end
+
+        receive do
+          {^tag, _result} -> :ok
+        after
+          0 -> :ok
+        end
+
+        access_token_failed("timed out after #{timeout}ms")
+    end
+  end
+
+  # Kills the resolver if the connecting process dies first, and goes away
+  # with the resolver otherwise
+  defp watch_parent(parent, resolver) do
+    spawn(fn ->
+      parent_ref = Process.monitor(parent)
+      resolver_ref = Process.monitor(resolver)
+
+      receive do
+        {:DOWN, ^parent_ref, :process, _, _} -> Process.exit(resolver, :kill)
+        {:DOWN, ^resolver_ref, :process, _, _} -> :ok
+      end
+    end)
+  end
+
+  defp access_token_failed(reason),
+    do: {:error, Tds.Error.exception("access token could not be fetched: #{reason}")}
+
+  defp normalize_access_token(token) when is_binary(token) and token != "", do: {:ok, token}
+
+  defp normalize_access_token({:ok, token}) when is_binary(token) and token != "",
+    do: {:ok, token}
+
+  # The reason may hold credentials, only its atom or struct name is reported
+  defp normalize_access_token({:error, reason}) do
+    message =
+      case reason do
+        %module{} -> "unable to fetch access token: #{inspect(module)}"
+        atom when is_atom(atom) -> "unable to fetch access token: #{inspect(atom)}"
+        _other -> "unable to fetch access token"
+      end
+
+    {:error, Tds.Error.exception(message)}
+  end
+
+  defp normalize_access_token(_other),
+    do: {:error, Tds.Error.exception("invalid :access_token, expected a non-empty string")}
 
   @spec disconnect(err :: Exception.t() | String.t(), state :: t()) :: :ok
   def disconnect(_err, %{sock: {mod, sock}} = s) do
@@ -99,8 +258,8 @@ defmodule Tds.Protocol do
       {:ok, _, s} ->
         {:ok, s}
 
-      {:disconnect, :closed, s} ->
-        {:disconnect, %Tds.Error{message: "Connection closed."}, s}
+      {:disconnect, _err, _s} = disconnect ->
+        disconnect
 
       {:error, err, s} ->
         err =
@@ -391,8 +550,14 @@ defmodule Tds.Protocol do
          :ok <- :inet.setopts(sock, buffer: max_buf_size(buffers)) do
       # Send Prelogin message to SQL Server
       case send_prelogin(%{s | sock: {:gen_tcp, sock}}) do
-        {:error, error, _state} ->
-          :gen_tcp.close(sock)
+        # close through the transport in use, which is TLS once PRELOGIN
+        # negotiated encryption
+        {:error, error, state} ->
+          disconnect(error, state)
+          {:error, error}
+
+        {:disconnect, error, state} ->
+          disconnect(error, state)
           {:error, error}
 
         other ->
@@ -567,6 +732,9 @@ defmodule Tds.Protocol do
 
       {:error, _, _} = err ->
         err
+
+      {:disconnect, _, _} = err ->
+        err
     end
   end
 
@@ -600,11 +768,16 @@ defmodule Tds.Protocol do
   end
 
   def login(%{opts: opts} = s) do
-    msg = msg_login(params: opts)
+    params =
+      opts
+      |> Keyword.put(:fed_auth_echo, s.fed_auth_echo)
+      |> Keyword.put(:access_token, s.access_token)
+
+    msg = msg_login(params: params)
 
     case login_send(msg, %{s | state: :login}) do
       {:ok, s} ->
-        {:ok, %{s | state: :ready}}
+        {:ok, %{s | state: :ready, max_response_bytes: opts[:max_response_bytes]}}
 
       err ->
         err
@@ -664,11 +837,11 @@ defmodule Tds.Protocol do
       {:ok, %{result: result} = s} ->
         {:ok, result, s}
 
-      {:error, err} ->
-        {:disconnect, err, s}
-
       {:error, err, s} ->
         {:disconnect, err, s}
+
+      {:disconnect, _err, _s} = disconnect ->
+        disconnect
     end
   end
 
@@ -817,21 +990,38 @@ defmodule Tds.Protocol do
   def message(
         :login,
         msg_loginack(redirect: %{hostname: host, port: port}),
-        %{opts: opts}
+        %{opts: opts, sock: {mod, sock}} = s
       ) do
+    # The gateway leg is done with, close it before following the route
+    _ = mod.close(sock)
+
     opts
     |> Keyword.put(:hostname, host)
     |> Keyword.put(:port, port)
-    |> connect()
+    |> Keyword.update(:ssl_opts, [], &route_ssl_opts(&1, host))
+    # the routed login reuses the token resolved for this connect
+    |> connect_resolved(s.access_token)
+    |> case do
+      {:ok, s} -> {:ok, s}
+      {:error, err} -> {:error, err, s}
+    end
   end
 
-  def message(:login, msg_loginack(), %{opts: opts} = s) do
-    state = %{s | opts: clean_opts(opts)}
+  # FEDAUTH FeatureId. Without its FEATUREEXTACK the server did not log in
+  # with the token.
+  @fed_auth_feature 0x02
 
-    opts
-    |> conn_opts()
-    |> IO.iodata_to_binary()
-    |> send_query(state)
+  def message(:login, msg_loginack(features: features), %{opts: opts} = s) do
+    if is_binary(s.access_token) and @fed_auth_feature not in features do
+      {:error, Tds.Error.exception("server did not acknowledge federated authentication"), s}
+    else
+      state = %{s | opts: clean_opts(opts), access_token: nil}
+
+      opts
+      |> conn_opts()
+      |> IO.iodata_to_binary()
+      |> send_query(state)
+    end
   end
 
   def message(:executing, msg_result(set: set), s) do
@@ -876,6 +1066,16 @@ defmodule Tds.Protocol do
     result = %Tds.Result{columns: [], rows: [], num_rows: 0}
 
     {:ok, %{s | statement: "", state: :ready, result: result}}
+  end
+
+  # A pinned SNI names the gateway. The routed server presents its own
+  # certificate, so the SNI (and the hostname check derived from it) follow
+  # the route.
+  defp route_ssl_opts(ssl_opts, host) do
+    case ssl_opts[:server_name_indication] do
+      sni when sni in [nil, :disable] -> ssl_opts
+      _gateway -> Keyword.put(ssl_opts, :server_name_indication, to_charlist(host))
+    end
   end
 
   defp mark_ready(%{state: _} = s) do
@@ -927,55 +1127,95 @@ defmodule Tds.Protocol do
       |> IO.iodata_to_binary()
       |> decode(s)
     else
-      {:disconnect, _ex, _s} = res -> {0, res}
-      other -> other
+      {:error, reason} ->
+        {:disconnect, closed_error(reason), s}
+
+      {:max_response_bytes, limit, received} ->
+        max_response_bytes_exceeded(limit, received, s)
+
+      {:disconnect, _ex, _s} = disconnect ->
+        disconnect
     end
+  end
+
+  # The rest of the response is still on the wire, so the connection can't be
+  # reused. Close it and let DBConnection drop it.
+  defp max_response_bytes_exceeded(limit, received, %{sock: {mod, sock}} = s) do
+    _ = mod.close(sock)
+    {:disconnect, Tds.ResponseTooLargeError.exception(limit: limit, received: received), s}
   end
 
   defp msg_recv(%{sock: {mod, pid}} = s) do
     case mod.recv(pid, 0) do
       {:ok, pkg} ->
+        received = count_received(0, pkg, s)
+
         pkg
         |> next_tds_pkg([])
-        |> msg_recv(s)
+        |> msg_recv(received, s)
 
       {:error, error} ->
-        {:disconnect,
-         %Tds.Error{
-           message: "Connection failed to receive packet due #{inspect(error)}"
-         }, s}
+        {:disconnect, closed_error(error), s}
     end
   catch
-    {:error, error} -> {:disconnect, error, s}
+    {:error, error} -> {:disconnect, closed_error(error), s}
+    {:max_response_bytes, _limit, _received} = exceeded -> exceeded
   end
 
-  defp msg_recv({:done, buffer, _}, _s) do
+  defp msg_recv({:done, buffer, _}, _received, _s) do
     Enum.reverse(buffer)
   end
 
-  defp msg_recv({:more, buffer, more, last?}, %{sock: {mod, pid}} = s) do
+  defp msg_recv({:more, buffer, more, last?}, received, %{sock: {mod, pid}} = s) do
     take = if last?, do: more, else: 0
 
     case mod.recv(pid, take) do
       {:ok, pkg} ->
+        received = count_received(received, pkg, s)
+
         next_tds_pkg(pkg, buffer, more, last?)
-        |> msg_recv(s)
+        |> msg_recv(received, s)
 
       {:error, error} ->
         throw({:error, error})
     end
   end
 
-  defp msg_recv({:more, buffer, unknown_pkg}, %{sock: {mod, pid}} = s) do
+  defp msg_recv({:more, buffer, unknown_pkg}, received, %{sock: {mod, pid}} = s) do
     case mod.recv(pid, 0) do
       {:ok, pkg} ->
+        received = count_received(received, pkg, s)
+
         unknown_pkg
         |> Kernel.<>(pkg)
         |> next_tds_pkg(buffer)
-        |> msg_recv(s)
+        |> msg_recv(received, s)
 
       {:error, error} ->
         throw({:error, error})
+    end
+  end
+
+  # Same exception as the other DBConnection drivers raise for a dead socket,
+  # so `rescue DBConnection.ConnectionError` keeps catching it
+  defp closed_error(reason) do
+    DBConnection.ConnectionError.exception(
+      "tds connection closed (the pool may have closed it after a timeout): #{inspect(reason)}"
+    )
+  end
+
+  # Bytes read from the socket for the current response, packet headers
+  # included (decrypted bytes over TLS). Stops reading once
+  # :max_response_bytes is exceeded.
+  defp count_received(received, pkg, s) do
+    received = received + byte_size(pkg)
+
+    case s.max_response_bytes do
+      limit when is_integer(limit) and received > limit ->
+        throw({:max_response_bytes, limit, received})
+
+      _ ->
+        received
     end
   end
 
@@ -1017,7 +1257,11 @@ defmodule Tds.Protocol do
   end
 
   defp clean_opts(opts) do
-    Keyword.put(opts, :password, :REDACTED)
+    opts = Keyword.put(opts, :password, :REDACTED)
+
+    if Keyword.has_key?(opts, :access_token),
+      do: Keyword.put(opts, :access_token, :REDACTED),
+      else: opts
   end
 
   @spec conn_opts(Keyword.t()) :: list() | no_return
@@ -1234,4 +1478,51 @@ defmodule Tds.Protocol do
     |> Keyword.values()
     |> Enum.max()
   end
+end
+
+defimpl Inspect, for: Tds.Protocol do
+  # Protocol state ends up in crash reports and DBConnection errors, keep
+  # credentials out of it
+  @secrets [:password, :access_token, :proxy_password]
+  # ssl_opts: the private key, its password and the same in certs_keys
+  @ssl_secrets [:password, :key]
+
+  def inspect(s, opts) do
+    s = %{s | opts: redact(s.opts), access_token: s.access_token && :REDACTED}
+    Inspect.Any.inspect(s, opts)
+  end
+
+  defp redact(opts) when is_list(opts) do
+    Enum.map(opts, fn
+      {key, _value} when key in @secrets -> {key, :REDACTED}
+      {:ssl_opts, ssl_opts} -> {:ssl_opts, redact_ssl(ssl_opts)}
+      other -> other
+    end)
+  end
+
+  defp redact(other), do: other
+
+  defp redact_ssl(ssl_opts) when is_list(ssl_opts) do
+    Enum.map(ssl_opts, fn
+      {key, _value} when key in @ssl_secrets ->
+        {key, :REDACTED}
+
+      {:certs_keys, certs_keys} when is_list(certs_keys) ->
+        {:certs_keys, Enum.map(certs_keys, &redact_cert_key/1)}
+
+      other ->
+        other
+    end)
+  end
+
+  defp redact_ssl(other), do: other
+
+  defp redact_cert_key(%{} = cert_key) do
+    Map.new(cert_key, fn
+      {key, _value} when key in @ssl_secrets -> {key, :REDACTED}
+      other -> other
+    end)
+  end
+
+  defp redact_cert_key(other), do: other
 end

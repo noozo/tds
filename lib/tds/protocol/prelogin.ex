@@ -166,10 +166,12 @@ defmodule Tds.Protocol.Prelogin do
           | {:login, state()}
           | {:disconnect, Tds.Error.t(), state()}
   def decode(packet_data, %{opts: opts} = s) do
-    {:ok, %{encryption: encryption, instance: instance}} =
+    {:ok, %{encryption: encryption, instance: instance, fed_auth_required: fed_auth_required}} =
       packet_data
       |> IO.iodata_to_binary()
       |> decode_tokens([], s)
+
+    s = %{s | fed_auth_echo: fed_auth_required}
 
     case {ssl?(opts), encryption, instance} do
       {_, _, false} ->
@@ -301,9 +303,15 @@ defmodule Tds.Protocol.Prelogin do
           %{m | instance: data == <<0x00>>}
         )
 
+      :fed_auth_required ->
+        decode_data(
+          tokens,
+          tail,
+          %{m | fed_auth_required: data != <<0x00>>}
+        )
+
       # :thread_id ->
       # :mars ->
-      # :fed_auth_required ->
       # :nonce_opt ->
       _ ->
         decode_data(tokens, tail, m)
