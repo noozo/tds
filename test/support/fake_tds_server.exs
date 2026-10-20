@@ -11,11 +11,13 @@ defmodule Tds.FakeServer do
   # and `login: :close` hangs up after reading LOGIN7, `set_batch: :close`
   # after reading the connection SET batch. `fed_auth_required: 0 | 1` adds
   # FEDAUTHREQUIRED to the PRELOGIN response and `fed_auth_ack: false` leaves
-  # the FEDAUTH FEATUREEXTACK out of the login response. `redirect: port` plays
+  # the FEDAUTH FEATUREEXTACK out of the login response. `prelogin_reply:`
+  # replaces the whole PRELOGIN response with the given option data. The
+  # client's PRELOGIN is reported as {:prelogin, data}. `redirect: port` plays
   # an Azure gateway: it routes the client to `route_host` (127.0.0.1 by
-  # default) on that port and reports
-  # whether the client closes the leg (as {:gateway_leg, result}), hanging up
-  # itself if the client keeps it open.
+  # default), as `host\instance` when `route_instance` is given, on that
+  # port and reports whether the client closes the leg (as {:gateway_leg,
+  # result}), hanging up itself if the client keeps it open.
   #
   # Pass a list of option lists to serve one connection after another.
 
@@ -41,9 +43,15 @@ defmodule Tds.FakeServer do
 
     # PRELOGIN: VERSION, ENCRYPTION (ON with TLS, NOT_SUP without) and
     # optionally FEDAUTHREQUIRED
-    _ = recv_message({:gen_tcp, sock})
+    send(test, {:prelogin, recv_message({:gen_tcp, sock})})
     encryption = if tls?, do: 0x01, else: 0x02
-    :ok = :gen_tcp.send(sock, packet(1, prelogin(encryption, opts[:fed_auth_required])))
+
+    reply =
+      Keyword.get_lazy(opts, :prelogin_reply, fn ->
+        prelogin(encryption, opts[:fed_auth_required])
+      end)
+
+    :ok = :gen_tcp.send(sock, packet(1, reply))
 
     conn = if tls?, do: {:ssl, tls_handshake(sock, test)}, else: {:gen_tcp, sock}
 
@@ -58,7 +66,9 @@ defmodule Tds.FakeServer do
         close(conn)
 
       {:redirect, port} ->
-        redirect(conn, Keyword.get(opts, :route_host, "127.0.0.1"), port, test)
+        route = Keyword.get(opts, :route_host, "127.0.0.1")
+        route = if instance = opts[:route_instance], do: route <> "\\" <> instance, else: route
+        redirect(conn, route, port, test)
 
       :ok ->
         # LOGINACK, FEATUREEXTACK (FEDAUTH, no data) and DONE
