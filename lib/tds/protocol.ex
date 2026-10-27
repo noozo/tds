@@ -988,7 +988,7 @@ defmodule Tds.Protocol do
 
   def message(
         :login,
-        msg_loginack(redirect: %{hostname: host, port: port}),
+        msg_loginack(redirect: %{hostname: host, port: port} = route),
         %{opts: opts, sock: {mod, sock}} = s
       ) do
     # The gateway leg is done with, close it before following the route
@@ -997,6 +997,9 @@ defmodule Tds.Protocol do
     opts
     |> Keyword.put(:hostname, host)
     |> Keyword.put(:port, port)
+    # LOGIN7 names the server the gateway routed to, with its instance:
+    # a Fabric backend hangs up on a login that names the bare host
+    |> Keyword.put(:routed_server_name, routed_server_name(route))
     |> Keyword.update(:ssl_opts, [], &route_ssl_opts(&1, host))
     # the routed login reuses the token resolved for this connect
     |> connect_resolved(s.access_token)
@@ -1066,6 +1069,12 @@ defmodule Tds.Protocol do
 
     {:ok, %{s | statement: "", state: :ready, result: result}}
   end
+
+  defp routed_server_name(%{hostname: host, instance: instance})
+       when is_binary(instance) and instance != "",
+       do: host <> "\\" <> instance
+
+  defp routed_server_name(%{hostname: host}), do: host
 
   # A pinned SNI names the gateway. The routed server presents its own
   # certificate, so the SNI (and the hostname check derived from it) follow

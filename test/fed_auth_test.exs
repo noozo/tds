@@ -31,18 +31,30 @@ defmodule FedAuthTest do
     headers <> <<0xFF>> <> data
   end
 
+  defp prelogin_options(<<0xFF, _::binary>>, _data), do: []
+
+  defp prelogin_options(<<token, offset::16, length::16, rest::binary>>, data),
+    do: [{token, binary_part(data, offset, length)} | prelogin_options(rest, data)]
+
   describe "PRELOGIN" do
     test "always requests FEDAUTHREQUIRED, with or without an access token" do
+      # [{token, data}], with the TRACEID ids left out: they are new on every call
       encode = fn opts ->
-        opts |> Prelogin.encode() |> IO.iodata_to_binary()
+        <<_header::binary-8, data::binary>> = opts |> Prelogin.encode() |> IO.iodata_to_binary()
+
+        data
+        |> prelogin_options(data)
+        |> Enum.map(fn
+          {0x05, _ids} -> {0x05, :ids}
+          option -> option
+        end)
       end
 
       assert encode.(ssl: true) == encode.(ssl: true, access_token: "tok")
 
-      <<_header::binary-8, options::binary>> = encode.(ssl: true)
-      # VERSION, ENCRYPTION, THREADID, MARS, FEDAUTHREQUIRED
-      <<_::binary-20, 0x06, offset::16, 1::16, 0xFF, _::binary>> = options
-      assert binary_part(options, offset, 1) == <<0x01>>
+      # VERSION, ENCRYPTION, THREADID, MARS, TRACEID, FEDAUTHREQUIRED
+      assert [0x00, 0x01, 0x03, 0x04, 0x05, 0x06] = Enum.map(encode.(ssl: true), &elem(&1, 0))
+      assert {0x06, <<0x01>>} = List.keyfind(encode.(ssl: true), 0x06, 0)
     end
 
     test "records the server FEDAUTHREQUIRED response as the echo flag" do

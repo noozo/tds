@@ -92,7 +92,7 @@ defmodule Tds.Protocol.Login7 do
       client_language_code_id: @language_code_id,
       username: opts[:username],
       password: opts[:password],
-      servername: opts[:hostname],
+      servername: opts[:routed_server_name] || opts[:hostname],
       database: Keyword.get(opts, :database, "")
     }
     |> put_fed_auth(opts[:access_token], opts)
